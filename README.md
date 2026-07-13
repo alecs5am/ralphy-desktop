@@ -4,8 +4,8 @@ Electron app with an embedded Claude Code chat that drives a Ralphy project — 
 pencil.dev shape, applied to UGC video. You chat; a Claude Code agent runs the
 `ralphy` pipeline over `workspace/projects/<id>/`; the project panel updates live.
 
-Filed alongside [`notes/ideas/009-desktop-app-claude-code.md`](../notes/ideas/009-desktop-app-claude-code.md).
-The renderer is brand-faithful (BRAND_DESIGN.md tokens, same fonts as `landing/`).
+The original design note remains in the core Ralphy development history. The
+renderer uses the same public brand language as the website.
 The Electron + Claude wiring is live: it spawns your local `claude` and streams a
 real conversation.
 
@@ -14,7 +14,6 @@ real conversation.
 Requires a local `claude` on PATH (`claude --version`) logged into your subscription.
 
 ```bash
-cd desktop
 bun install                  # downloads the Electron binary; needs network
 bun run start                # builds renderer + electron, then opens the window
 ```
@@ -83,3 +82,9 @@ subscription and bills pay-per-token. The onboarding screen warns when it detect
   changes under `workspace/projects/<id>/`.
 - **cwd is the repo root** for the demo (so the agent loads the full router). A real
   build would scope it to the selected project dir.
+
+## Repository boundary
+
+The desktop app launches installed coding-agent and `ralphy` binaries. It must
+not import TypeScript from a sibling core checkout. CLI behavior belongs in
+[alecs5am/ralphy](https://github.com/alecs5am/ralphy).
