@@ -20,6 +20,7 @@ final class LibraryViewModel: ObservableObject {
     private var store: MetadataStore?
     private var watcher: FolderWatcher?
     private var reloadTask: Task<Void, Never>?
+    private var scanTask: Task<Void, Never>?
 
     var filteredItems: [MediaItem] {
         items.filter { item in
@@ -72,18 +73,30 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func load(root: URL) {
-        do {
-            let scanned = try MediaScanner().scan(root: root)
-            let metadata = try MetadataStore(root: root)
-            rootURL = root.standardizedFileURL
-            items = scanned.items
-            annotations = metadata.annotations
-            store = metadata
-            selectedIDs = selectedIDs.intersection(Set(scanned.items.map(\.id)))
-            UserDefaults.standard.set(root.standardizedFileURL.path, forKey: "lastRalphyRoot")
-            startWatching(root: root.standardizedFileURL)
-        } catch {
-            errorMessage = String(describing: error)
+        let root = root.standardizedFileURL
+        scanTask?.cancel()
+        scanTask = Task { @MainActor [weak self] in
+            do {
+                let scanned = try await Task.detached(priority: .userInitiated) {
+                    try MediaScanner().scan(root: root)
+                }.value
+                guard !Task.isCancelled, let self else { return }
+
+                let metadata = try MetadataStore(root: root)
+                guard !Task.isCancelled else { return }
+                self.rootURL = root
+                self.items = scanned.items
+                self.annotations = metadata.annotations
+                self.store = metadata
+                self.selectedIDs = self.selectedIDs.intersection(Set(scanned.items.map(\.id)))
+                UserDefaults.standard.set(root.path, forKey: "lastRalphyRoot")
+                self.startWatching(root: root)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.errorMessage = String(describing: error)
+            }
         }
     }
 
