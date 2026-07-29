@@ -1,5 +1,47 @@
 # Ralphy Desktop
 
+This repository now contains two desktop surfaces:
+
+- `native/RalphyMedia` — native macOS media browser for generated `.ralphy` files.
+- the original Electron chat spike — embedded Claude Code chat over a Ralphy project.
+
+## Run the native media browser
+
+Requires Xcode Command Line Tools with Swift 6.
+
+```bash
+cd native/RalphyMedia
+swift run RalphyMedia /Users/maximovchinnikov/github/ralphy/ralphy/.ralphy
+```
+
+You can also run `swift run RalphyMedia` and choose a `.ralphy` folder from the
+open panel.
+
+The app indexes `.ralphy/workspaces/<workspace>/projects/<project>` and watches
+the selected `.ralphy` folder with FSEvents. New generated media appears after a
+short debounce without restarting the app.
+
+Review metadata is stored next to the selected Ralphy state in:
+
+```text
+.ralphy/media-library/library.json
+```
+
+The app does not mutate generated artifacts when setting ratings, favorites,
+tags, notes, or the rejected/slop flag. The destructive action is explicit
+`Move to Trash`, implemented with the macOS Trash API.
+
+Useful checks:
+
+```bash
+cd native/RalphyMedia
+swift test
+swift build
+swift run RalphyMedia --scan-only /Users/maximovchinnikov/github/ralphy/ralphy/.ralphy
+```
+
+## Run the Electron app (real chat, real auth)
+
 Electron app with an embedded Claude Code chat that drives a Ralphy project — the
 pencil.dev shape, applied to UGC video. You chat; a Claude Code agent runs the
 `ralphy` pipeline over `workspace/projects/<id>/`; the project panel updates live.
@@ -8,8 +50,6 @@ The original design note remains in the core Ralphy development history. The
 renderer uses the same public brand language as the website.
 The Electron + Claude wiring is live: it spawns your local `claude` and streams a
 real conversation.
-
-## Run the desktop app (real chat, real auth)
 
 Requires a local `claude` on PATH (`claude --version`) logged into your subscription.
 
