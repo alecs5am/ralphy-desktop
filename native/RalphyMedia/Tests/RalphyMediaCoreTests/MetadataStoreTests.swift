@@ -24,4 +24,24 @@ import Testing
     #expect(loaded.annotations[path]?.tags == ["keeper"])
     #expect(loaded.annotations[path]?.note == "Use this as the agent reference.")
     #expect(FileManager.default.fileExists(atPath: root.url.appending(path: "media-library/library.json").path))
+    let data = try Data(contentsOf: root.url.appending(path: "media-library/library.json"))
+    let payload = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(payload["schemaVersion"] as? Int == 1)
+}
+
+@Test func metadataStorePreservesMalformedMetadataFile() throws {
+    let root = try TemporaryRalphy.make()
+    let fileURL = root.url.appending(path: "media-library/library.json")
+    let original = Data("{ malformed".utf8)
+    try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try original.write(to: fileURL)
+
+    do {
+        _ = try MetadataStore(root: root.url)
+        Issue.record("Expected corrupt metadata to fail")
+    } catch let MetadataStoreError.corruptFile(url) {
+        #expect(url == fileURL)
+    }
+
+    #expect(try Data(contentsOf: fileURL) == original)
 }

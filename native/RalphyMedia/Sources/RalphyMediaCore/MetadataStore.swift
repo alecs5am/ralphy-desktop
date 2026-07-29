@@ -1,5 +1,9 @@
 import Foundation
 
+public enum MetadataStoreError: Error, Equatable, Sendable {
+    case corruptFile(URL)
+}
+
 public struct MetadataStore: Sendable {
     public private(set) var root: URL
     public var annotations: [String: MediaAnnotation]
@@ -14,7 +18,11 @@ public struct MetadataStore: Sendable {
         self.root = standardizedRoot
         if FileManager.default.fileExists(atPath: metadataURL.path) {
             let data = try Data(contentsOf: metadataURL)
-            self.annotations = try JSONDecoder.iso8601Decoder.decode(Payload.self, from: data).annotations
+            do {
+                self.annotations = try JSONDecoder.ralphy.decode(Payload.self, from: data).annotations
+            } catch {
+                throw MetadataStoreError.corruptFile(metadataURL)
+            }
         } else {
             self.annotations = [:]
         }
@@ -31,7 +39,24 @@ public struct MetadataStore: Sendable {
 }
 
 private struct Payload: Codable {
+    let schemaVersion: Int
     var annotations: [String: MediaAnnotation]
+
+    init(schemaVersion: Int = 1, annotations: [String: MediaAnnotation]) {
+        self.schemaVersion = schemaVersion
+        self.annotations = annotations
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case annotations
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        annotations = try container.decode([String: MediaAnnotation].self, forKey: .annotations)
+    }
 }
 
 private extension JSONEncoder {
@@ -40,13 +65,5 @@ private extension JSONEncoder {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         return encoder
-    }
-}
-
-private extension JSONDecoder {
-    static var iso8601Decoder: JSONDecoder {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return decoder
     }
 }

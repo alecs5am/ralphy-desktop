@@ -20,7 +20,7 @@ import Testing
     let annotation = MediaAnnotation(
         rating: 2,
         favorite: false,
-        rejected: true,
+        verdict: .reject,
         tags: ["slop", "bad-motion"],
         note: "Hands melt during the courier shot.",
         updatedAt: Date(timeIntervalSince1970: 1)
@@ -29,10 +29,13 @@ import Testing
     let markdown = AgentFeedback.render(items: [item], annotations: [item.relativePath: annotation])
 
     #expect(markdown.contains("Copy for Agent"))
+    #expect(markdown.contains("Selected: 1 file"))
+    #expect(markdown.contains("### `\(item.relativePath)`"))
+    #expect(markdown.contains("absolute path: `\(item.url.path)`"))
     #expect(markdown.contains("nightmaker / hook"))
     #expect(markdown.contains("workspaces/nightmaker/projects/hook/artifacts/videos/shot.mp4"))
     #expect(markdown.contains("rating: 2/5"))
-    #expect(markdown.contains("rejected: yes"))
+    #expect(markdown.contains("verdict: reject"))
     #expect(markdown.contains("tags: slop, bad-motion"))
     #expect(markdown.contains("Hands melt during the courier shot."))
 }
