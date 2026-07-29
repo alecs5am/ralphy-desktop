@@ -33,6 +33,8 @@ CoreServices/FSEvents, Swift Testing, JSON, POSIX shell.
 **Files:**
 - Modify: `native/RalphyMedia/Sources/RalphyMediaCore/MediaModels.swift`
 - Modify: `native/RalphyMedia/Sources/RalphyMediaCore/MediaScanner.swift`
+- Modify: `native/RalphyMedia/Sources/RalphyMediaApp/LibraryViewModel.swift`
+- Modify: `native/RalphyMedia/Sources/RalphyMediaApp/RalphyMediaApp.swift`
 - Modify: `native/RalphyMedia/Tests/RalphyMediaCoreTests/MediaScannerTests.swift`
 
 **Interfaces:**
@@ -86,7 +88,8 @@ return shape do not exist.
 Enumerate with `.isDirectoryKey`, call `skipDescendants()` for hidden,
 dependency/build, and `render/work-*` directories, classify the extensions
 listed in the design, and return a `ScanResult`. Keep one resource-value fetch
-per visited URL and sort once at the end.
+per visited URL and sort once at the end. Update the two executable call sites
+to consume `ScanResult.items` so the complete package continues to compile.
 
 - [ ] **Step 4: Run scanner tests and the real scan**
 
