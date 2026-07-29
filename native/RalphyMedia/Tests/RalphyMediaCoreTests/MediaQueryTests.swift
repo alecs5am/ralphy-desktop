@@ -53,6 +53,26 @@ import Testing
     #expect(result.map(\.id) == ["a", "b"])
 }
 
+@Test func queryExcludesOnlyRejectedItemsWhenRequested() {
+    let maybe = queryItem(
+        id: "maybe",
+        relativePath: "workspaces/nightmaker/projects/hook/maybe.mov",
+        workspace: "nightmaker",
+        project: "hook",
+        bucket: .video,
+        modifiedAt: 30
+    )
+    var annotations = queryAnnotations
+    annotations[maybe.relativePath] = MediaAnnotation(verdict: .maybe)
+
+    let result = MediaQuery(excludeRejected: true).apply(
+        to: queryItems + [maybe],
+        annotations: annotations
+    )
+
+    #expect(result.map(\.id) == ["tagged-image", "maybe", "other-project"])
+}
+
 private let queryItems = [
     queryItem(
         id: "old-reject",

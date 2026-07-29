@@ -45,3 +45,42 @@ import Testing
 
     #expect(try Data(contentsOf: fileURL) == original)
 }
+
+@Test func metadataStoreRejectsExternalValidChangeAndPreservesIt() throws {
+    let root = try TemporaryRalphy.make()
+    let fileURL = root.url.appending(path: "media-library/library.json")
+    let path = "workspaces/ws/projects/p/shot.mp4"
+    var original = try MetadataStore(root: root.url)
+    original.annotations[path] = MediaAnnotation(note: "original")
+    try original.save()
+
+    var stale = try MetadataStore(root: root.url)
+    var external = try MetadataStore(root: root.url)
+    external.annotations[path] = MediaAnnotation(note: "external")
+    try external.save()
+    let externalBytes = try Data(contentsOf: fileURL)
+    stale.annotations[path] = MediaAnnotation(note: "stale overwrite")
+
+    #expect(throws: MetadataStoreError.conflict(fileURL)) {
+        try stale.save()
+    }
+    #expect(try Data(contentsOf: fileURL) == externalBytes)
+}
+
+@Test func metadataStoreRejectsLaterCorruptionAndPreservesIt() throws {
+    let root = try TemporaryRalphy.make()
+    let fileURL = root.url.appending(path: "media-library/library.json")
+    var original = try MetadataStore(root: root.url)
+    original.annotations["item"] = MediaAnnotation(note: "original")
+    try original.save()
+
+    var stale = try MetadataStore(root: root.url)
+    let corruptBytes = Data("{ externally corrupted".utf8)
+    try corruptBytes.write(to: fileURL)
+    stale.annotations["item"] = MediaAnnotation(note: "stale overwrite")
+
+    #expect(throws: MetadataStoreError.corruptFile(fileURL)) {
+        try stale.save()
+    }
+    #expect(try Data(contentsOf: fileURL) == corruptBytes)
+}

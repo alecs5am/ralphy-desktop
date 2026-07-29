@@ -45,7 +45,7 @@ final class LibraryViewModel: ObservableObject {
     private struct LibraryContext {
         let root: URL
         var annotations: [String: MediaAnnotation]
-        let store: MetadataStore?
+        var store: MetadataStore?
         let metadataWarning: String?
     }
 
@@ -56,6 +56,7 @@ final class LibraryViewModel: ObservableObject {
     }
 
     private let appSettings: AppSettings
+    private let metadataSaveCoordinator = MetadataSaveCoordinator()
     private var desiredContext: LibraryContext?
     private var requestedScan: ScanRequest?
     private var store: MetadataStore?
@@ -139,8 +140,8 @@ final class LibraryViewModel: ObservableObject {
     }
 
     var showRejected: Bool {
-        get { query.verdict == nil }
-        set { updateQuery { $0.verdict = newValue ? nil : .unreviewed } }
+        get { !query.excludeRejected }
+        set { updateQuery { $0.excludeRejected = !newValue } }
     }
 
     func restoreLastLibrary() {
@@ -204,6 +205,7 @@ final class LibraryViewModel: ObservableObject {
         }
 
         desiredContext = context
+        startWatching(root: root)
         requestScan()
     }
 
@@ -407,20 +409,21 @@ final class LibraryViewModel: ObservableObject {
 
         let snapshot = annotations
         let root = store.root
+        let coordinator = metadataSaveCoordinator
         metadataSaveTasks[root]?.cancel()
         metadataSaveTasks[root] = Task { [weak self, store] in
             do {
                 try await Task.sleep(for: .milliseconds(350))
                 try Task.checkCancellation()
-                try await Task.detached(priority: .utility) {
-                    var updatedStore = store
-                    updatedStore.annotations = snapshot
-                    try updatedStore.save()
-                }.value
+                var updatedStore = store
+                updatedStore.annotations = snapshot
+                let save = await coordinator.submit(updatedStore)
+                let savedStore = try await save.value
+                self?.metadataSaveCompleted(savedStore)
             } catch is CancellationError {
                 return
             } catch {
-                self?.errorMessage = "Could not save annotations: \(error.localizedDescription)"
+                self?.errorMessage = "Annotations were not saved. \(error.localizedDescription)"
             }
         }
     }
@@ -480,7 +483,6 @@ final class LibraryViewModel: ObservableObject {
                 errorMessage = warning
             }
             updateVisibleItems()
-            startWatching(root: latestContext.root)
         } catch {
             guard request.generation == scanGeneration else { return }
             scanDuration = Date().timeIntervalSince(startedAt)
@@ -499,6 +501,14 @@ final class LibraryViewModel: ObservableObject {
             }
         }
         watcher?.start()
+    }
+
+    private func metadataSaveCompleted(_ savedStore: MetadataStore) {
+        guard rootURL == savedStore.root else { return }
+        store = savedStore
+        if desiredContext?.root == savedStore.root {
+            desiredContext?.store = savedStore
+        }
     }
 
     private func updateVisibleItems() {

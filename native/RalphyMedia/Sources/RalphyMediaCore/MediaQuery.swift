@@ -28,6 +28,7 @@ public struct MediaSection: Identifiable, Hashable, Sendable {
 public struct MediaQuery: Sendable {
     public var search: String?
     public var verdict: ReviewVerdict?
+    public var excludeRejected: Bool
     public var favoriteOnly: Bool
     public var workspace: String?
     public var project: String?
@@ -38,6 +39,7 @@ public struct MediaQuery: Sendable {
     public init(
         search: String? = nil,
         verdict: ReviewVerdict? = nil,
+        excludeRejected: Bool = false,
         favoriteOnly: Bool = false,
         workspace: String? = nil,
         project: String? = nil,
@@ -47,6 +49,7 @@ public struct MediaQuery: Sendable {
     ) {
         self.search = search
         self.verdict = verdict
+        self.excludeRejected = excludeRejected
         self.favoriteOnly = favoriteOnly
         self.workspace = workspace
         self.project = project
@@ -63,6 +66,7 @@ public struct MediaQuery: Sendable {
         let filtered = items.filter { item in
             let annotation = annotations[item.relativePath] ?? MediaAnnotation()
             guard verdict == nil || annotation.verdict == verdict else { return false }
+            guard !excludeRejected || annotation.verdict != .reject else { return false }
             guard !favoriteOnly || annotation.favorite else { return false }
             guard workspace == nil || item.workspace == workspace else { return false }
             guard project == nil || item.project == project else { return false }
