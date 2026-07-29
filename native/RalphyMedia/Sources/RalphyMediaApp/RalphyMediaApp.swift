@@ -9,8 +9,8 @@ struct RalphyMediaApp: App {
            CommandLine.arguments.indices.contains(flagIndex + 1) {
             let root = URL(filePath: CommandLine.arguments[flagIndex + 1])
             do {
-                let items = try MediaScanner().scan(root: root)
-                print("Indexed \(items.count) files in \(root.path)")
+                let result = try MediaScanner().scan(root: root)
+                print("Indexed \(result.items.count) files in \(root.path)")
                 Foundation.exit(0)
             } catch {
                 fputs("Scan failed: \(error)\n", stderr)

@@ -76,10 +76,10 @@ final class LibraryViewModel: ObservableObject {
             let scanned = try MediaScanner().scan(root: root)
             let metadata = try MetadataStore(root: root)
             rootURL = root.standardizedFileURL
-            items = scanned
+            items = scanned.items
             annotations = metadata.annotations
             store = metadata
-            selectedIDs = selectedIDs.intersection(Set(scanned.map(\.id)))
+            selectedIDs = selectedIDs.intersection(Set(scanned.items.map(\.id)))
             UserDefaults.standard.set(root.standardizedFileURL.path, forKey: "lastRalphyRoot")
             startWatching(root: root.standardizedFileURL)
         } catch {

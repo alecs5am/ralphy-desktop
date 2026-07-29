@@ -230,7 +230,7 @@ private struct Thumbnail: View {
                     Image(systemName: "waveform").font(.system(size: 34))
                 case .text:
                     Image(systemName: "doc.text").font(.system(size: 34))
-                case .other:
+                case .document, .other:
                     Image(systemName: "doc").font(.system(size: 34))
                 }
             }
@@ -297,7 +297,7 @@ private struct Preview: View {
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-            case .other:
+            case .document, .other:
                 Image(systemName: "doc")
             }
         }

@@ -5,7 +5,26 @@ public enum MediaBucket: String, Codable, CaseIterable, Hashable, Sendable {
     case video
     case audio
     case text
+    case document
     case other
+}
+
+public struct ScanOptions: Sendable {
+    public let includeIntermediates: Bool
+
+    public init(includeIntermediates: Bool = false) {
+        self.includeIntermediates = includeIntermediates
+    }
+}
+
+public struct ScanResult: Sendable {
+    public let items: [MediaItem]
+    public let skipped: Int
+
+    public init(items: [MediaItem], skipped: Int) {
+        self.items = items
+        self.skipped = skipped
+    }
 }
 
 public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
