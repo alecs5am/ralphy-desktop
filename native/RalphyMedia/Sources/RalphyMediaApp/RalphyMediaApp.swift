@@ -19,7 +19,7 @@ struct RalphyMediaApp: App {
         }
 
         if CommandLine.arguments.count == 2, !CommandLine.arguments[1].hasPrefix("-") {
-            UserDefaults.standard.set(URL(filePath: CommandLine.arguments[1]).standardizedFileURL.path, forKey: "lastRalphyRoot")
+            AppSettings().lastRoot = URL(filePath: CommandLine.arguments[1])
         }
     }
 

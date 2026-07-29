@@ -2,13 +2,13 @@ import CoreServices
 import Foundation
 
 final class FolderWatcher {
-    private let url: URL
+    private let workspacesURL: URL
     private let onChange: () -> Void
     private var stream: FSEventStreamRef?
     private let queue = DispatchQueue(label: "app.ralphy.media.folder-watcher")
 
-    init(url: URL, onChange: @escaping () -> Void) {
-        self.url = url
+    init(root: URL, onChange: @escaping () -> Void) {
+        self.workspacesURL = root.appending(path: "workspaces")
         self.onChange = onChange
     }
 
@@ -37,7 +37,7 @@ final class FolderWatcher {
             kCFAllocatorDefault,
             callback,
             &context,
-            [url.path] as CFArray,
+            [workspacesURL.path] as CFArray,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
             0.5,
             UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes)
@@ -51,9 +51,9 @@ final class FolderWatcher {
 
     func stop() {
         guard let stream else { return }
+        self.stream = nil
         FSEventStreamStop(stream)
         FSEventStreamInvalidate(stream)
         FSEventStreamRelease(stream)
-        self.stream = nil
     }
 }
