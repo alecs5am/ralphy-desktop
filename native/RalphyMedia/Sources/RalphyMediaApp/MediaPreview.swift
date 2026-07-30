@@ -177,7 +177,7 @@ struct MediaPreview: View {
                     .scaledToFit()
                     .accessibilityLabel("Preview of \(item.filename)")
             } else if let player = model.player {
-                VideoPlayer(player: player)
+                NativePlayerView(player: player)
                     .accessibilityLabel("Media player for \(item.filename)")
             } else if let text = model.text {
                 ScrollView {
@@ -233,6 +233,44 @@ struct MediaPreview: View {
         case .document: "doc.richtext"
         case .other: "doc"
         }
+    }
+}
+
+struct NativePlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        Self.makePlayerView(player: player)
+    }
+
+    func updateNSView(_ view: AVPlayerView, context: Context) {
+        Self.updatePlayerView(view, player: player)
+    }
+
+    static func dismantleNSView(_ view: AVPlayerView, coordinator: ()) {
+        dismantlePlayerView(view)
+    }
+
+    @MainActor
+    static func makePlayerView(player: AVPlayer) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .floating
+        view.videoGravity = .resizeAspect
+        view.player = player
+        return view
+    }
+
+    @MainActor
+    static func updatePlayerView(_ view: AVPlayerView, player: AVPlayer) {
+        guard view.player !== player else { return }
+        view.player?.pause()
+        view.player = player
+    }
+
+    @MainActor
+    static func dismantlePlayerView(_ view: AVPlayerView) {
+        view.player?.pause()
+        view.player = nil
     }
 }
 
