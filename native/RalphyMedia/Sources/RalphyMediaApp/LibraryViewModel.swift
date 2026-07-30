@@ -137,6 +137,7 @@ typealias MediaQueryEvaluator = @Sendable (
 ) -> [MediaSection]
 
 typealias TrashItemOperation = @Sendable (URL) throws -> Void
+typealias AnnotationSaveOperation = @Sendable (MetadataStore) async throws -> MetadataStore
 
 @MainActor
 final class LibraryViewModel: ObservableObject {
@@ -213,10 +214,16 @@ final class LibraryViewModel: ObservableObject {
         let annotations: [String: MediaAnnotation]
     }
 
+    private enum AnnotationSaveOutcome {
+        case saved
+        case reloadRequired
+        case retryableFailure
+    }
+
     private let appSettings: AppSettings
     private let queryEvaluator: MediaQueryEvaluator
     private let trashItem: TrashItemOperation
-    private let metadataSaveCoordinator = MetadataSaveCoordinator()
+    private let annotationSave: AnnotationSaveOperation
     private var desiredContext: LibraryContext?
     private var requestedScan: ScanRequest?
     private var store: MetadataStore?
@@ -245,11 +252,21 @@ final class LibraryViewModel: ObservableObject {
         trashItem: @escaping TrashItemOperation = { url in
             var resultingURL: NSURL?
             try FileManager.default.trashItem(at: url, resultingItemURL: &resultingURL)
-        }
+        },
+        annotationSave: AnnotationSaveOperation? = nil
     ) {
         appSettings = settings
         self.queryEvaluator = queryEvaluator
         self.trashItem = trashItem
+        if let annotationSave {
+            self.annotationSave = annotationSave
+        } else {
+            let coordinator = MetadataSaveCoordinator()
+            self.annotationSave = { store in
+                let save = await coordinator.submit(store)
+                return try await save.value
+            }
+        }
         query = MediaQuery(
             verdict: settings.verdict,
             excludeRejected: settings.excludeRejected,
@@ -271,7 +288,6 @@ final class LibraryViewModel: ObservableObject {
     }
 
     var selectedItems: [MediaItem] {
-        guard !isApplyingQuery else { return [] }
         return visibleItems.filter { selectedIDs.contains($0.id) }
     }
 
@@ -344,6 +360,10 @@ final class LibraryViewModel: ObservableObject {
         !pendingAnnotationSaves.isEmpty
     }
 
+    var hasPendingTerminationWork: Bool {
+        hasPendingAnnotationSaves || isTrashing
+    }
+
     func count(for verdict: ReviewVerdict) -> Int {
         sourceCounts.count(for: verdict)
     }
@@ -362,6 +382,10 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func pickLibrary() {
+        guard !isTrashing else {
+            errorMessage = "Wait for the Trash operation to finish before changing libraries."
+            return
+        }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -375,6 +399,10 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func load(root: URL) {
+        guard !isTrashing else {
+            errorMessage = "Wait for the Trash operation to finish before changing libraries."
+            return
+        }
         let root = root.standardizedFileURL
         var isDirectory: ObjCBool = false
         let workspaces = root.appending(path: "workspaces")
@@ -388,10 +416,15 @@ final class LibraryViewModel: ObservableObject {
         if pendingAnnotationSaves[root] != nil {
             Task { [weak self] in
                 guard let self else { return }
-                if !(await self.flushPendingAnnotationSave(for: root)) {
+                switch await self.flushPendingAnnotationSave(for: root) {
+                case .saved:
+                    self.openValidatedRoot(root)
+                case .reloadRequired:
                     self.cancelPendingSave(for: root)
+                    self.openValidatedRoot(root)
+                case .retryableFailure:
+                    break
                 }
-                self.openValidatedRoot(root)
             }
             return
         }
@@ -557,7 +590,7 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func requestTrash() {
-        guard !isTrashing else { return }
+        guard !isApplyingQuery, !isTrashing else { return }
         let selected = selectedItems
         guard !selected.isEmpty else { return }
         pendingTrashConfirmation = selected
@@ -710,40 +743,60 @@ final class LibraryViewModel: ObservableObject {
         while let request = pendingAnnotationSaves.values.min(
             by: { $0.generation < $1.generation }
         ) {
-            guard await flushPendingAnnotationSave(for: request.store.root) else {
+            guard case .saved = await flushPendingAnnotationSave(
+                for: request.store.root
+            ) else {
                 return false
             }
         }
         return true
     }
 
-    private func flushPendingAnnotationSave(for root: URL) async -> Bool {
-        while let request = pendingAnnotationSaves[root] {
-            metadataSaveTasks[root]?.cancel()
-            guard await persistAnnotationSave(request) else { return false }
+    func completePendingTerminationWork() async -> Bool {
+        let annotationsSaved = await flushPendingAnnotationSaves()
+        if let trashTask {
+            await trashTask.value
         }
-        return true
+        return annotationsSaved
     }
 
-    private func persistAnnotationSave(_ request: AnnotationSaveRequest) async -> Bool {
+    private func flushPendingAnnotationSave(
+        for root: URL
+    ) async -> AnnotationSaveOutcome {
+        while let request = pendingAnnotationSaves[root] {
+            metadataSaveTasks[root]?.cancel()
+            let outcome = await persistAnnotationSave(request)
+            guard case .saved = outcome else { return outcome }
+        }
+        return .saved
+    }
+
+    private func persistAnnotationSave(
+        _ request: AnnotationSaveRequest
+    ) async -> AnnotationSaveOutcome {
         var updatedStore = request.store
         updatedStore.annotations = request.annotations
 
         do {
-            let save = await metadataSaveCoordinator.submit(updatedStore)
-            let savedStore = try await save.value
+            let savedStore = try await annotationSave(updatedStore)
             let root = request.store.root
             guard pendingAnnotationSaves[root]?.generation == request.generation else {
-                return true
+                return .saved
             }
             pendingAnnotationSaves[root] = nil
             metadataSaveTasks[root] = nil
             metadataSaveCompleted(savedStore)
-            return true
+            return .saved
+        } catch let error as MetadataStoreError {
+            errorMessage = "Annotations were not saved. \(error.localizedDescription)"
+            switch error {
+            case .conflict, .corruptFile, .unsupportedFutureSchema:
+                return .reloadRequired
+            }
         } catch {
             errorMessage = "Annotations were not saved. \(error.localizedDescription)"
-            return false
         }
+        return .retryableFailure
     }
 
     private func cancelPendingSave(for root: URL) {

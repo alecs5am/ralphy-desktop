@@ -18,15 +18,15 @@ final class RalphyMediaApplicationDelegate: NSObject, NSApplicationDelegate {
             return .terminateLater
         }
         guard let viewModel,
-              viewModel.hasPendingAnnotationSaves else {
+              viewModel.hasPendingTerminationWork else {
             return .terminateNow
         }
 
         terminationReplyPending = true
         Task { [weak self] in
-            let saved = await viewModel.flushPendingAnnotationSaves()
+            let completed = await viewModel.completePendingTerminationWork()
             self?.terminationReplyPending = false
-            sender.reply(toApplicationShouldTerminate: saved)
+            sender.reply(toApplicationShouldTerminate: completed)
         }
         return .terminateLater
     }

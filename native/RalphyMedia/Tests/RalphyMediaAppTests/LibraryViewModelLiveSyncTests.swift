@@ -13,10 +13,12 @@ func liveSyncPreservesSelectionForExistingFilesAndDropsRemovedFiles() async thro
     let viewModel = LibraryViewModel(settings: fixture.settings)
     viewModel.load(root: fixture.rootURL)
     try await waitUntil {
-        !viewModel.isScanning && viewModel.items.count == 1
+        !viewModel.isScanning
+            && !viewModel.isApplyingQuery
+            && viewModel.visibleItems.count == 1
     }
 
-    let selected = try #require(viewModel.items.first)
+    let selected = try #require(viewModel.visibleItems.first)
     viewModel.select(selected)
     #expect(viewModel.selectedIDs == [selected.id])
     #expect(viewModel.primarySelection?.id == selected.id)
@@ -25,7 +27,9 @@ func liveSyncPreservesSelectionForExistingFilesAndDropsRemovedFiles() async thro
         to: fixture.projectURL.appending(path: "new.png")
     )
     try await waitUntil {
-        !viewModel.isScanning && viewModel.items.count == 2
+        !viewModel.isScanning
+            && !viewModel.isApplyingQuery
+            && viewModel.visibleItems.count == 2
     }
 
     #expect(viewModel.selectedIDs == [selected.id])
@@ -41,7 +45,9 @@ func liveSyncPreservesSelectionForExistingFilesAndDropsRemovedFiles() async thro
     viewModel.select(selected)
     try FileManager.default.removeItem(at: selectedURL)
     try await waitUntil {
-        !viewModel.isScanning && viewModel.items.count == 1
+        !viewModel.isScanning
+            && !viewModel.isApplyingQuery
+            && viewModel.visibleItems.count == 1
     }
 
     #expect(viewModel.selectedIDs.isEmpty)

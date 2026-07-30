@@ -41,6 +41,38 @@ func queryPipelineRunsOffMainAndDiscardsStaleResults() async throws {
 }
 
 @Test @MainActor
+func reviewActionDuringQueryAppliesToCurrentSelection() async throws {
+    let fixture = try ResponsiveLibraryFixture(filenames: ["keep.mp4", "slow.mp4"])
+    defer { fixture.remove() }
+    let evaluator = BlockingQueryEvaluator()
+    let viewModel = LibraryViewModel(
+        settings: fixture.settings,
+        queryEvaluator: evaluator.evaluate
+    )
+
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntil {
+        !viewModel.isScanning && viewModel.visibleItems.count == 2
+    }
+    let selected = try #require(
+        viewModel.visibleItems.first(where: { $0.filename == "keep.mp4" })
+    )
+    viewModel.select(selected)
+    evaluator.resetHistory()
+
+    viewModel.searchText = "slow"
+    try await waitUntil { evaluator.slowQueryStarted }
+    #expect(viewModel.isApplyingQuery)
+
+    viewModel.setVerdict(.keep)
+    #expect(viewModel.annotation(for: selected).verdict == .keep)
+
+    evaluator.releaseSlowQuery()
+    try await waitUntil { !viewModel.isApplyingQuery }
+    #expect(await viewModel.flushPendingAnnotationSaves())
+}
+
+@Test @MainActor
 func immediateFlushPersistsLatestAnnotationBeforeDebounce() async throws {
     let fixture = try ResponsiveLibraryFixture(filenames: ["latest.png"])
     defer { fixture.remove() }
@@ -105,7 +137,7 @@ func repeatedTerminationRequestKeepsWaitingForPendingSave() async throws {
 
     let delegate = RalphyMediaApplicationDelegate()
     delegate.attach(viewModel: viewModel)
-    let application = NSApplication()
+    let application = NSApplication.shared
 
     #expect(delegate.applicationShouldTerminate(application) == .terminateLater)
     #expect(delegate.applicationShouldTerminate(application) == .terminateLater)
@@ -209,6 +241,71 @@ func reopeningSameRootRecoversFromStaleMetadataRevision() async throws {
     #expect(persisted.annotations[item.relativePath]?.verdict == .keep)
 }
 
+@Test @MainActor
+func reopeningSameRootRetainsPendingAnnotationAfterTransientSaveFailure() async throws {
+    let fixture = try ResponsiveLibraryFixture(filenames: ["retry.png"])
+    defer { fixture.remove() }
+    let viewModel = LibraryViewModel(
+        settings: fixture.settings,
+        annotationSave: { _ in
+            throw ResponsiveLibraryTestError.intentionalSaveFailure
+        }
+    )
+
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntil {
+        !viewModel.isScanning && viewModel.visibleItems.count == 1
+    }
+
+    let item = try #require(viewModel.visibleItems.first)
+    viewModel.select(item)
+    viewModel.setVerdict(.keep)
+    viewModel.load(root: fixture.rootURL)
+
+    try await waitUntil {
+        viewModel.errorMessage?.contains("Annotations were not saved") == true
+    }
+    #expect(viewModel.hasPendingAnnotationSaves)
+    #expect(viewModel.annotation(for: item).verdict == .keep)
+    #expect(try MetadataStore(root: fixture.rootURL).annotations[item.relativePath] == nil)
+}
+
+@Test @MainActor
+func terminationWaitsForTrashAndLibraryChangeIsBlocked() async throws {
+    let fixture = try ResponsiveLibraryFixture(filenames: ["remove.png"])
+    defer { fixture.remove() }
+    let other = try ResponsiveLibraryFixture(filenames: ["other.png"])
+    defer { other.remove() }
+    let operation = BlockingTrashOperation()
+    let viewModel = LibraryViewModel(
+        settings: fixture.settings,
+        trashItem: operation.trash
+    )
+
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntil {
+        !viewModel.isScanning && viewModel.visibleItems.count == 1
+    }
+    viewModel.selectAllVisible()
+    viewModel.requestTrash()
+    viewModel.confirmTrash()
+    try await waitUntil { operation.removeStarted }
+
+    let delegate = RalphyMediaApplicationDelegate()
+    delegate.attach(viewModel: viewModel)
+    let application = NSApplication.shared
+    #expect(delegate.applicationShouldTerminate(application) == .terminateLater)
+
+    viewModel.load(root: other.rootURL)
+    try await Task.sleep(for: .milliseconds(700))
+    #expect(viewModel.rootURL?.path == fixture.rootURL.standardizedFileURL.path)
+    #expect(viewModel.errorMessage?.contains("Trash operation") == true)
+
+    operation.releaseRemove()
+    try await waitUntil { !viewModel.isTrashing }
+    #expect(viewModel.items.isEmpty)
+}
+
 @MainActor
 private func waitUntil(
     timeout: Duration = .seconds(8),
@@ -227,6 +324,7 @@ private func waitUntil(
 private enum ResponsiveLibraryTestError: Error {
     case timedOut
     case intentionalTrashFailure
+    case intentionalSaveFailure
 }
 
 private final class BlockingQueryEvaluator: @unchecked Sendable {
