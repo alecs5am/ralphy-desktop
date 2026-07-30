@@ -9,6 +9,19 @@ This repository now contains two desktop surfaces:
 
 Requires Xcode Command Line Tools with Swift 6.
 
+Build the macOS app bundle, then open it as a normal application:
+
+```bash
+cd native/RalphyMedia
+./scripts/build-app.sh
+open "dist/Ralphy Media.app" --args /Users/maximovchinnikov/github/ralphy/ralphy/.ralphy
+```
+
+Double-click `dist/Ralphy Media.app` to choose a `.ralphy` folder from the open
+panel.
+
+For development, the standard Swift Package Manager path remains available:
+
 ```bash
 cd native/RalphyMedia
 swift run RalphyMedia /Users/maximovchinnikov/github/ralphy/ralphy/.ralphy
@@ -38,6 +51,8 @@ cd native/RalphyMedia
 swift test
 swift build
 swift run RalphyMedia --scan-only /Users/maximovchinnikov/github/ralphy/ralphy/.ralphy
+./scripts/build-app.sh
+./scripts/test-app.sh /Users/maximovchinnikov/github/ralphy/ralphy/.ralphy
 ```
 
 ## Run the Electron app (real chat, real auth)

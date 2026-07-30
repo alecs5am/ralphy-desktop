@@ -2,7 +2,19 @@
 
 Native macOS browser for generated files inside a Ralphy `.ralphy` directory.
 
-## Run
+## Run the app
+
+Build the app bundle once, then launch the packaged app:
+
+```bash
+./scripts/build-app.sh
+open "dist/Ralphy Media.app" --args /Users/maximovchinnikov/github/ralphy/ralphy/.ralphy
+```
+
+Double-click `dist/Ralphy Media.app` to select a `.ralphy` folder from the open
+panel.
+
+## Develop
 
 ```bash
 swift run RalphyMedia /Users/maximovchinnikov/github/ralphy/ralphy/.ralphy
@@ -34,4 +46,6 @@ are not edited for review metadata.
 swift test
 swift build
 swift run RalphyMedia --scan-only /Users/maximovchinnikov/github/ralphy/ralphy/.ralphy
+./scripts/build-app.sh
+./scripts/test-app.sh /Users/maximovchinnikov/github/ralphy/ralphy/.ralphy
 ```
