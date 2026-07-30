@@ -74,7 +74,7 @@ struct InspectorView: View {
                 }
             )) {
                 ForEach(ReviewVerdict.allCases, id: \.self) { verdict in
-                    Text(verdictTitle(verdict))
+                    Text(verdict.displayName)
                         .tag(Optional(verdict))
                 }
             }
@@ -287,15 +287,5 @@ private struct SelectionProperties: View {
 private extension Collection {
     var only: Element? {
         count == 1 ? first : nil
-    }
-}
-
-private func verdictTitle(_ verdict: ReviewVerdict) -> String {
-    switch verdict {
-    case .unreviewed: "Unreviewed"
-    case .keep: "Keep"
-    case .maybe: "Maybe"
-    case .needsWork: "Needs Work"
-    case .reject: "Reject"
     }
 }

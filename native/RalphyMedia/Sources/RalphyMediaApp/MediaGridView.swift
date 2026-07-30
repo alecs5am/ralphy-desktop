@@ -189,7 +189,7 @@ struct MediaGridView: View {
 
         Menu("Verdict") {
             ForEach(ReviewVerdict.allCases, id: \.self) { verdict in
-                Button(verdictTitle(verdict)) {
+                Button(verdict.displayName) {
                     selectForBatchAction(item)
                     viewModel.setVerdict(verdict)
                 }
@@ -403,7 +403,7 @@ private struct MediaTile: View {
         var parts = [
             item.filename,
             item.project,
-            verdictTitle(annotation.verdict),
+            annotation.verdict.displayName,
             "rating \(annotation.rating) of 5",
         ]
         if annotation.favorite {
@@ -475,16 +475,6 @@ private func symbol(for bucket: MediaBucket) -> String {
     case .text: "doc.text"
     case .document: "doc.richtext"
     case .other: "doc"
-    }
-}
-
-private func verdictTitle(_ verdict: ReviewVerdict) -> String {
-    switch verdict {
-    case .unreviewed: "Unreviewed"
-    case .keep: "Keep"
-    case .maybe: "Maybe"
-    case .needsWork: "Needs Work"
-    case .reject: "Reject"
     }
 }
 

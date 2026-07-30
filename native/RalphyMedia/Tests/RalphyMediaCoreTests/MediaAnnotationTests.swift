@@ -38,7 +38,7 @@ import Testing
     #expect(annotation.verdict == .unreviewed)
 }
 
-@Test func reviewVocabularyPreservesStoredKeepAndMaybeValues() {
+@Test func reviewPresentationVocabularyUsesApprovedAndShortlist() {
     #expect(ReviewVerdict.keep.rawValue == "keep")
     #expect(ReviewVerdict.keep.displayName == "Approved")
     #expect(ReviewVerdict.maybe.displayName == "Shortlist")
