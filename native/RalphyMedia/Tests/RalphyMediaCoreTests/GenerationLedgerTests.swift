@@ -141,6 +141,7 @@ import Testing
     )
 
     let first = await index.summary(for: project, root: root.url)
+    spy.reset()
     try append(
         String(third[split...]) + "\n",
         to: root.url.appending(path: "\(project.relativePath)/logs/generations.jsonl")
@@ -148,7 +149,13 @@ import Testing
     let second = await index.summary(for: project, root: root.url)
 
     #expect(first.indexedByteOffset == UInt64(complete.utf8.count))
-    #expect(spy.openOffsets.contains(UInt64(complete.utf8.count)))
+    #expect(spy.openOffsets == [
+        0,
+        0,
+        UInt64(complete.utf8.count),
+        UInt64(complete.utf8.count),
+        0,
+    ])
     #expect(abs(second.totalSpendUSD - 0.40) < 0.000_001)
 }
 
@@ -263,20 +270,19 @@ import Testing
     let project = ProjectReference(workspaceID: "ws", projectID: "p")
     let relativeLog = "\(project.relativePath)/logs/generations.jsonl"
     let logURL = root.url.appending(path: relativeLog)
-    try root.write(
-        relativeLog,
-        string: generationLine(cost: 0.10, output: "artifacts/images/a.png") + "\n"
-    )
+    let initial = generationLine(cost: 0.10, output: "artifacts/images/a.png") + "\n"
+    try root.write(relativeLog, string: initial)
     let cache = root.url.appending(path: "cache")
     let spy = LedgerByteReaderSpy()
     let index = GenerationLedgerIndex(cacheDirectory: cache, byteReader: spy.reader)
     _ = await index.summary(for: project, root: root.url)
-    try mutateCache(in: cache) { $0["indexedByteOffset"] = 5 }
+    try forgeCacheOffset(in: cache, source: Data(initial.utf8), offset: 5)
+    spy.reset()
 
     try append(generationLine(cost: 0.20, output: "artifacts/images/b.png") + "\n", to: logURL)
     let rebuilt = await index.summary(for: project, root: root.url)
 
-    #expect(spy.openOffsets.last == 0)
+    #expect(spy.openOffsets == [0, 0, 0, 0])
     #expect(abs(rebuilt.totalSpendUSD - 0.30) < 0.000_001)
     #expect(rebuilt.malformedLineCount == 0)
 }
@@ -287,22 +293,26 @@ import Testing
     let relativeLog = "\(project.relativePath)/logs/generations.jsonl"
     let logURL = root.url.appending(path: relativeLog)
     let first = generationLine(cost: 0.10, output: "artifacts/images/a.png") + "\n"
-    try root.write(
-        relativeLog,
-        string: first + generationLine(cost: 0.20, output: "artifacts/images/b.png") + "\n"
-    )
+    let initial = first + generationLine(
+        cost: 0.20,
+        output: "artifacts/images/b.png"
+    ) + "\n"
+    try root.write(relativeLog, string: initial)
     let cache = root.url.appending(path: "cache")
     let spy = LedgerByteReaderSpy()
     let index = GenerationLedgerIndex(cacheDirectory: cache, byteReader: spy.reader)
     _ = await index.summary(for: project, root: root.url)
-    try mutateCache(in: cache) {
-        $0["indexedByteOffset"] = UInt64(first.utf8.count)
-    }
+    try forgeCacheOffset(
+        in: cache,
+        source: Data(initial.utf8),
+        offset: first.utf8.count
+    )
+    spy.reset()
 
     try append(generationLine(cost: 0.30, output: "artifacts/images/c.png") + "\n", to: logURL)
     let rebuilt = await index.summary(for: project, root: root.url)
 
-    #expect(spy.openOffsets.last == 0)
+    #expect(spy.openOffsets == [0, 0, UInt64(first.utf8.count), 0, 0])
     #expect(abs(rebuilt.totalSpendUSD - 0.60) < 0.000_001)
     #expect(rebuilt.malformedLineCount == 0)
 }
@@ -508,13 +518,46 @@ private func cacheFiles(in directory: URL) throws -> [URL] {
 
 private func mutateCache(
     in directory: URL,
-    mutation: (inout [String: Any]) -> Void
+    mutation: (inout [String: Any]) throws -> Void
 ) throws {
     let cacheURL = try #require(cacheFiles(in: directory).first)
     let data = try Data(contentsOf: cacheURL)
     var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-    mutation(&object)
+    try mutation(&object)
     try JSONSerialization.data(withJSONObject: object).write(to: cacheURL, options: .atomic)
+}
+
+private func forgeCacheOffset(
+    in directory: URL,
+    source: Data,
+    offset: Int
+) throws {
+    try mutateCache(in: directory) { object in
+        try #require((0...source.count).contains(offset))
+        var witness = try #require(object["witness"] as? [String: Any])
+        let prefixLength = min(4 * 1_024, source.count)
+        let boundaryLength = min(4 * 1_024, offset)
+        let boundaryStart = offset - boundaryLength
+        let prefix = Data(source.prefix(prefixLength))
+        let boundary = Data(source[boundaryStart..<offset])
+        let tail = Data(source[offset..<source.count])
+
+        object["indexedByteOffset"] = UInt64(offset)
+        witness["prefixLength"] = UInt64(prefixLength)
+        witness["prefixHash"] = testStableHash(prefix)
+        witness["boundaryStart"] = UInt64(boundaryStart)
+        witness["boundaryLength"] = UInt64(boundaryLength)
+        witness["boundaryHash"] = testStableHash(boundary)
+        witness["incompleteTailLength"] = UInt64(tail.count)
+        witness["incompleteTailHash"] = testStableHash(tail)
+        object["witness"] = witness
+    }
+}
+
+private func testStableHash(_ data: Data) -> UInt64 {
+    data.reduce(14_695_981_039_346_656_037) {
+        ($0 ^ UInt64($1)) &* 1_099_511_628_211
+    }
 }
 
 private func fileNumber(at url: URL) throws -> UInt64 {
@@ -537,6 +580,13 @@ private final class LedgerByteReaderSpy: @unchecked Sendable {
 
     var readCount: Int {
         lock.withLock { requestedByteCounts.count }
+    }
+
+    func reset() {
+        lock.withLock {
+            offsets.removeAll()
+            requestedByteCounts.removeAll()
+        }
     }
 
     var reader: GenerationLedgerByteReader {
