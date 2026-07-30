@@ -40,11 +40,15 @@ export function Inspector({
   onChange,
   onTrash,
 }: InspectorProps) {
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const copyForAgent = async () => {
-    await bridge.copyText(formatAgentFeedback(project, [item], annotation ? { [item.id]: annotation } : {}));
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1400);
+    try {
+      await bridge.copyText(formatAgentFeedback(project, [item], annotation ? { [item.id]: annotation } : {}));
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    window.setTimeout(() => setCopyState("idle"), 1600);
   };
 
   return (
@@ -57,9 +61,17 @@ export function Inspector({
         </span>
       </div>
 
-      <button className="agent-copy-button" type="button" onClick={copyForAgent}>
+      <button
+        className={`agent-copy-button${copyState === "failed" ? " is-error" : ""}`}
+        type="button"
+        onClick={copyForAgent}
+      >
         <Clipboard size={14} />
-        {copied ? "Copied" : "Copy for Agent"}
+        {copyState === "copied"
+          ? "Copied"
+          : copyState === "failed"
+            ? "Copy failed"
+            : "Copy for Agent"}
       </button>
 
       <ReviewControls annotation={annotation} onChange={onChange} />

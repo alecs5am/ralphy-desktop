@@ -4,7 +4,10 @@ import type {
   MediaItem,
   ProjectSummary,
 } from "../electron/media/types";
-import { formatAgentFeedback } from "../src/lib/agent-feedback";
+import {
+  AGENT_FEEDBACK_LIMIT_CHARS,
+  formatAgentFeedback,
+} from "../src/lib/agent-feedback";
 import {
   adjacentMediaItem,
   annotationWithPatch,
@@ -80,6 +83,19 @@ describe("review workflow", () => {
     expect(text).toContain("Keep the framing, replace the motion.");
     expect(text).toContain("kling-v3");
     expect(text).toContain("$1.20");
+  });
+
+  test("bounds large review batches below the clipboard IPC limit", () => {
+    const media = item("scene-oversized");
+    const text = formatAgentFeedback(project, [media], {
+      [media.id]: {
+        ...reviewed,
+        notes: "x".repeat(AGENT_FEEDBACK_LIMIT_CHARS + 100),
+      },
+    });
+
+    expect(text.length).toBeLessThanOrEqual(AGENT_FEEDBACK_LIMIT_CHARS);
+    expect(text).toContain("Feedback truncated to clipboard limit");
   });
 
   test("navigates adjacent visible items without wrapping", () => {

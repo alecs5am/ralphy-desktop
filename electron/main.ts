@@ -37,6 +37,7 @@ import { guardedAtomicWrite } from "./media/atomic-write";
 import {
   ActiveRootResource,
   type ActiveMediaSession,
+  createSingleFlight,
   guardedResult,
   guardedSideEffect,
   type MediaSessionEpoch,
@@ -157,6 +158,7 @@ let win: BrowserWindow | null = null;
 let worker: MediaWorkerClient | null = null;
 const mediaState = new MediaSessionState();
 const watcher = new ActiveRootResource<LibraryWatcher>();
+const restoreLibrary = createSingleFlight<LibraryOpenResult | null>();
 
 function emitMedia(event: MediaEvent): void {
   sendIfWindowAlive(win, MEDIA_CHANNELS.event, event);
@@ -404,13 +406,15 @@ function registerMediaIpc(): void {
     }
   });
   ipcMain.handle(MEDIA_CHANNELS.restoreLibrary, () => {
-    const operation = beginOpenOperation();
-    return restorePersistedLibrary(
-      mediaState,
-      operation,
-      async (assertCurrent) => (await readSettings(assertCurrent)).lastLibrary,
-      openLibrary,
-    );
+    return restoreLibrary(() => {
+      const operation = beginOpenOperation();
+      return restorePersistedLibrary(
+        mediaState,
+        operation,
+        async (assertCurrent) => (await readSettings(assertCurrent)).lastLibrary,
+        openLibrary,
+      );
+    });
   });
   ipcMain.handle(MEDIA_CHANNELS.openLibrary, async (_event, rootPath: unknown) => {
     const operation = beginOpenOperation();
@@ -526,7 +530,9 @@ function createWindow(): void {
     minWidth: 1100,
     minHeight: 720,
     titleBarStyle: "hiddenInset",
-    backgroundColor: "#121212",
+    vibrancy: "sidebar",
+    visualEffectState: "active",
+    backgroundColor: "#00000000",
     show: !SMOKE_TEST,
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
@@ -549,7 +555,30 @@ function createWindow(): void {
       void (async () => {
         for (let attempt = 0; attempt < 100; attempt += 1) {
           const ready = await createdWindow.webContents.executeJavaScript(
-            "Boolean(document.querySelector('.workbench') && window.ralphy?.chooseLibrary)",
+            `(() => {
+              if (
+                !document.querySelector(".workbench")
+                || !window.ralphy?.chooseLibrary
+                || !CSS.supports("corner-shape", "squircle")
+              ) return false;
+              const fixture = document.createElement("div");
+              fixture.innerHTML = [
+                '<button class="filter-chip">Filter</button>',
+                '<button class="structure-row">Row</button>',
+                '<div class="project-controls"></div>',
+              ].join("");
+              document.body.append(fixture);
+              const chip = getComputedStyle(fixture.children[0]);
+              const row = getComputedStyle(fixture.children[1]);
+              const controls = getComputedStyle(fixture.children[2]);
+              const valid =
+                Number.parseFloat(chip.fontSize) >= 11
+                && chip.getPropertyValue("corner-shape").trim() === "round"
+                && row.borderBottomWidth === "0px"
+                && controls.containerName === "project-controls";
+              fixture.remove();
+              return valid;
+            })()`,
           );
           if (ready) {
             console.log("RALPHY_SMOKE_READY");

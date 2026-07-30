@@ -87,7 +87,7 @@ export function AssetViewer({
   onPrevious,
   onNext,
 }: AssetViewerProps) {
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onBack();
@@ -99,9 +99,13 @@ export function AssetViewer({
   }, [canNext, canPrevious, onBack, onNext, onPrevious]);
 
   const copy = async () => {
-    await bridge.copyText(formatAgentFeedback(project, [item], annotation ? { [item.id]: annotation } : {}));
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1400);
+    try {
+      await bridge.copyText(formatAgentFeedback(project, [item], annotation ? { [item.id]: annotation } : {}));
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    window.setTimeout(() => setCopyState("idle"), 1600);
   };
 
   return (
@@ -117,7 +121,18 @@ export function AssetViewer({
         <div className="viewer-actions">
           <button type="button" disabled={!canPrevious} title="Previous" aria-label="Previous" onClick={onPrevious}><ChevronLeft size={15} /></button>
           <button type="button" disabled={!canNext} title="Next" aria-label="Next" onClick={onNext}><ChevronRight size={15} /></button>
-          <button type="button" onClick={copy}><Clipboard size={13} />{copied ? "Copied" : "Copy for Agent"}</button>
+          <button
+            className={copyState === "failed" ? "is-error" : ""}
+            type="button"
+            onClick={copy}
+          >
+            <Clipboard size={13} />
+            {copyState === "copied"
+              ? "Copied"
+              : copyState === "failed"
+                ? "Copy failed"
+                : "Copy for Agent"}
+          </button>
           <button type="button" title="Reveal in Finder" aria-label="Reveal in Finder" onClick={() => bridge.showInFinder(item.absolutePath)}><FolderSearch size={14} /></button>
           <button type="button" title="Open externally" aria-label="Open externally" onClick={() => bridge.openExternal(item.absolutePath)}><ExternalLink size={14} /></button>
         </div>

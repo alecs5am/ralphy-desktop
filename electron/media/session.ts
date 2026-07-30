@@ -16,6 +16,22 @@ export class StaleMediaSessionError extends Error {
   }
 }
 
+export function createSingleFlight<Result>(): (
+  start: () => Promise<Result>,
+) => Promise<Result> {
+  let pending: Promise<Result> | null = null;
+  return (start) => {
+    if (pending) return pending;
+    const operation = start();
+    pending = operation;
+    const clear = () => {
+      if (pending === operation) pending = null;
+    };
+    void operation.then(clear, clear);
+    return operation;
+  };
+}
+
 export interface MediaSessionEpoch {
   readonly epoch: number;
 }

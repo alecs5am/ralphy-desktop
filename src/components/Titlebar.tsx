@@ -1,36 +1,29 @@
 import {
-  ChevronLeft,
-  ChevronRight,
+  ArrowLeft,
+  ArrowRight,
+  Folder,
   FolderOpen,
+  MoreHorizontal,
   PanelRight,
 } from "lucide-react";
+import { useState } from "react";
 
-interface TitlebarProps {
-  breadcrumbs: string[];
+interface SidebarChromeProps {
   canGoBack: boolean;
   canGoForward: boolean;
-  canToggleInspector: boolean;
-  inspectorVisible: boolean;
   onBack(): void;
   onForward(): void;
-  onChooseLibrary(): void;
-  onToggleInspector(): void;
 }
 
-export function Titlebar({
-  breadcrumbs,
+export function SidebarChrome({
   canGoBack,
   canGoForward,
-  canToggleInspector,
-  inspectorVisible,
   onBack,
   onForward,
-  onChooseLibrary,
-  onToggleInspector,
-}: TitlebarProps) {
+}: SidebarChromeProps) {
   return (
-    <header className="titlebar">
-      <div className="titlebar-traffic-space" aria-hidden="true" />
+    <div className="sidebar-chrome">
+      <div className="sidebar-traffic-space" aria-hidden="true" />
       <nav className="history-controls" aria-label="Navigation history">
         <button
           className="icon-button"
@@ -40,7 +33,7 @@ export function Titlebar({
           disabled={!canGoBack}
           onClick={onBack}
         >
-          <ChevronLeft size={16} strokeWidth={1.8} />
+          <ArrowLeft size={16} strokeWidth={1.5} />
         </button>
         <button
           className="icon-button"
@@ -50,30 +43,83 @@ export function Titlebar({
           disabled={!canGoForward}
           onClick={onForward}
         >
-          <ChevronRight size={16} strokeWidth={1.8} />
+          <ArrowRight size={16} strokeWidth={1.5} />
         </button>
       </nav>
+    </div>
+  );
+}
 
-      <div className="breadcrumbs" aria-label="Current location">
-        <span className="brand-mark" aria-hidden="true">R</span>
+interface MainHeaderProps {
+  breadcrumbs: string[];
+  canToggleInspector: boolean;
+  inspectorVisible: boolean;
+  showChooseLibrary: boolean;
+  onChooseLibrary(): void;
+  onToggleInspector(): void;
+}
+
+export function MainHeader({
+  breadcrumbs,
+  canToggleInspector,
+  inspectorVisible,
+  showChooseLibrary,
+  onChooseLibrary,
+  onToggleInspector,
+}: MainHeaderProps) {
+  const [actionsOpen, setActionsOpen] = useState(false);
+  return (
+    <header className="main-header">
+      <Folder size={16} strokeWidth={1.5} aria-hidden="true" />
+      <nav className="breadcrumbs" aria-label="Current location">
         {breadcrumbs.map((crumb, index) => (
           <span className="breadcrumb" key={`${crumb}-${index}`}>
-            {index > 0 && <ChevronRight size={12} aria-hidden="true" />}
+            {index > 0 && <span className="breadcrumb-separator">/</span>}
             <span>{crumb}</span>
           </span>
         ))}
-      </div>
-
-      <div className="titlebar-actions">
-        <button
-          className="icon-button"
-          type="button"
-          title="Choose .ralphy library"
-          aria-label="Choose .ralphy library"
-          onClick={onChooseLibrary}
-        >
-          <FolderOpen size={15} strokeWidth={1.8} />
-        </button>
+      </nav>
+      <div className="main-header-actions">
+        {showChooseLibrary && (
+          <button
+            className="icon-button"
+            type="button"
+            title="Choose .ralphy library"
+            aria-label="Choose .ralphy library"
+            onClick={onChooseLibrary}
+          >
+            <FolderOpen size={15} strokeWidth={1.5} />
+          </button>
+        )}
+        {!showChooseLibrary && (
+          <div className="header-actions-menu-wrap">
+            <button
+              className={`icon-button${actionsOpen ? " is-active" : ""}`}
+              type="button"
+              title="Library actions"
+              aria-label="Library actions"
+              aria-expanded={actionsOpen}
+              onClick={() => setActionsOpen((open) => !open)}
+            >
+              <MoreHorizontal size={16} strokeWidth={1.5} />
+            </button>
+            {actionsOpen && (
+              <div className="header-actions-menu" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setActionsOpen(false);
+                    onChooseLibrary();
+                  }}
+                >
+                  <FolderOpen size={14} strokeWidth={1.5} />
+                  Change library
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         <button
           className={`icon-button${inspectorVisible ? " is-active" : ""}`}
           type="button"
@@ -83,7 +129,7 @@ export function Titlebar({
           disabled={!canToggleInspector}
           onClick={onToggleInspector}
         >
-          <PanelRight size={15} strokeWidth={1.8} />
+          <PanelRight size={16} strokeWidth={1.5} />
         </button>
       </div>
     </header>

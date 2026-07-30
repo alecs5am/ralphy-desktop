@@ -10,6 +10,7 @@ import {
   defaultMediaQuery,
   groupMediaItems,
   queryMediaItems,
+  resetProjectQuery,
 } from "../src/lib/media";
 
 function item(
@@ -120,6 +121,25 @@ describe("media query", () => {
       "Final renders",
       "Lifecycle documents",
     ]);
+  });
+
+  test("resets visible filters without changing the project mode or scan scope", () => {
+    const query: MediaQueryOptions = {
+      ...defaultMediaQuery,
+      mode: "assets",
+      search: "hero",
+      kinds: ["image"],
+      reviewStatuses: ["Shortlist"],
+      sortBy: "cost",
+      groupBy: "review",
+      includeIntermediate: true,
+    };
+
+    expect(resetProjectQuery(query)).toEqual({
+      ...defaultMediaQuery,
+      mode: "assets",
+      includeIntermediate: true,
+    });
   });
 });
 

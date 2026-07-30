@@ -1,4 +1,4 @@
-import { Check, Heart, Star, X } from "lucide-react";
+import { Heart, Star, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type {
   AnnotationInput,
@@ -15,12 +15,13 @@ interface ReviewControlsProps {
 const statuses: Array<{
   value: ReviewStatus;
   label: string;
+  dot?: string;
 }> = [
   { value: "Unreviewed", label: "Unreviewed" },
-  { value: "Approved", label: "Approved" },
-  { value: "Shortlist", label: "Shortlist" },
-  { value: "Needs Work", label: "Needs work" },
-  { value: "Reject", label: "Reject" },
+  { value: "Approved", label: "Approved", dot: "ok" },
+  { value: "Shortlist", label: "Shortlist", dot: "accent" },
+  { value: "Needs Work", label: "Needs work", dot: "warn" },
+  { value: "Reject", label: "Reject", dot: "danger" },
 ];
 
 export function ReviewControls({ annotation, onChange }: ReviewControlsProps) {
@@ -52,8 +53,7 @@ export function ReviewControls({ annotation, onChange }: ReviewControlsProps) {
             key={status.value}
             onClick={() => change({ reviewStatus: status.value })}
           >
-            {status.value === "Approved" && <Check size={11} />}
-            {status.value === "Reject" && <X size={11} />}
+            {status.dot && <span className={`status-dot dot-${status.dot}`} />}
             {status.label}
           </button>
         ))}

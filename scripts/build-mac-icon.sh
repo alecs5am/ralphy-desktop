@@ -6,7 +6,7 @@ iconset="$root/build/RalphyMedia.iconset"
 master="$root/build/app-icon-1024.png"
 
 mkdir -p "$iconset"
-rsvg-convert -w 1024 -h 1024 "$root/assets/app-icon.svg" -o "$master"
+cp "$root/assets/app-icon-1024.png" "$master"
 
 for size in 16 32 128 256 512; do
   sips -z "$size" "$size" "$master" --out "$iconset/icon_${size}x${size}.png" >/dev/null

@@ -1,15 +1,12 @@
-import {
-  CircleDollarSign,
-  Film,
-  MonitorPlay,
-  Radio,
-} from "lucide-react";
+import { Clipboard } from "lucide-react";
 import type { ProjectScanResult, ProjectSummary } from "../lib/ipc";
 
 interface ProjectHeaderProps {
   project: ProjectSummary;
   scan: ProjectScanResult | null;
   loading: boolean;
+  copyState: "idle" | "copied" | "failed";
+  onCopyForAgent(): void;
 }
 
 function nextStep(project: ProjectSummary): string {
@@ -20,37 +17,49 @@ function nextStep(project: ProjectSummary): string {
   return "Continue workflow";
 }
 
-export function ProjectHeader({ project, scan, loading }: ProjectHeaderProps) {
-  const spend = scan?.ledger.totalCostUsd || project.spendUsd;
+export function ProjectHeader({
+  project,
+  scan,
+  loading,
+  copyState,
+  onCopyForAgent,
+}: ProjectHeaderProps) {
+  const spend = scan?.ledger.totalCostUsd ?? project.spendUsd;
   return (
     <header className="project-header">
-      <div className="project-heading">
-        <div className="screen-kicker">Project · {project.projectId}</div>
-        <h2>{project.name}</h2>
-        <p>{project.brief || "Ralphy production project"}</p>
+      <div className="project-header-top">
+        <div className="project-heading">
+          <h2>{project.name}</h2>
+          <p>{project.brief || "Ralphy production project"}</p>
+        </div>
+        <button
+          className={`command-button${copyState === "failed" ? " is-error" : ""}`}
+          type="button"
+          onClick={onCopyForAgent}
+        >
+          <Clipboard size={15} strokeWidth={1.5} />
+          {copyState === "copied"
+            ? "Copied"
+            : copyState === "failed"
+              ? "Copy failed"
+              : "Copy for Agent"}
+        </button>
       </div>
       <div className="project-facts" aria-label="Production status">
         <span>
-          <Radio size={13} />
           <i className={`phase-indicator phase-${project.phase ?? "unknown"}`} />
           {project.phase ?? project.status}
         </span>
         <span>
-          <MonitorPlay size={13} />
           {[project.platform, project.aspectRatio].filter(Boolean).join(" · ") || "No format"}
         </span>
-        <span>
-          <Film size={13} />
-          {project.finalState}
-        </span>
+        <span>{project.finalState}</span>
         <span className="project-spend">
-          <CircleDollarSign size={13} />
           {spend === null ? "Cost unknown" : `$${spend.toFixed(2)}`}
         </span>
-      </div>
-      <div className="next-step">
-        <span>Next</span>
-        <strong>{loading ? "Indexing project…" : nextStep(project)}</strong>
+        <span className="next-step">
+          Next · {loading ? "Indexing project…" : nextStep(project)}
+        </span>
       </div>
     </header>
   );

@@ -13,11 +13,14 @@ import { VirtualAssetGrid } from "../components/VirtualAssetGrid";
 import type {
   MediaAnnotation,
   MediaItem,
+  MediaKind,
   MediaQueryOptions,
   ProjectMode,
   ProjectScanResult,
   ProjectSummary,
 } from "../lib/ipc";
+import { bridge } from "../lib/ipc";
+import { formatAgentFeedback } from "../lib/agent-feedback";
 import {
   defaultMediaQuery,
   groupMediaItems,
@@ -62,6 +65,7 @@ export function ProjectScreen({
     ...defaultMediaQuery,
     includeIntermediate,
   });
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [gridSize, setGridSize] = useState(230);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const items = scan?.items ?? [];
@@ -79,6 +83,23 @@ export function ProjectScreen({
     () => groupMediaItems(visibleItems, query.groupBy, annotations),
     [annotations, query.groupBy, visibleItems],
   );
+  const kindCounts = useMemo(() => {
+    const counts: Record<MediaKind, number> = {
+      image: 0,
+      video: 0,
+      audio: 0,
+      text: 0,
+      pdf: 0,
+      other: 0,
+    };
+    const modeItems = queryMediaItems(
+      items,
+      { ...defaultMediaQuery, mode: query.mode },
+      {},
+    );
+    for (const item of modeItems) counts[item.kind] += 1;
+    return counts;
+  }, [items, query.mode]);
 
   const updateQuery = (next: MediaQueryOptions) => {
     if (next.includeIntermediate !== query.includeIntermediate) {
@@ -94,12 +115,40 @@ export function ProjectScreen({
     onSelectAsset(item);
   };
 
+  const copyForAgent = async () => {
+    const reviewedItems = items.filter((item) => {
+      const annotation = annotations[item.id];
+      return Boolean(
+        annotation &&
+          (annotation.reviewStatus !== "Unreviewed" ||
+            annotation.favorite ||
+            annotation.rating > 0 ||
+            annotation.tags.length > 0 ||
+            annotation.notes.trim()),
+      );
+    });
+    try {
+      await bridge.copyText(formatAgentFeedback(project, reviewedItems, annotations));
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    window.setTimeout(() => setCopyState("idle"), 1600);
+  };
+
   return (
     <main className="main-region project-region">
-      <ProjectHeader project={project} scan={scan} loading={loading} />
+      <ProjectHeader
+        project={project}
+        scan={scan}
+        loading={loading}
+        copyState={copyState}
+        onCopyForAgent={() => void copyForAgent()}
+      />
       <ProjectControls
         query={query}
         itemCount={query.mode === "overview" ? items.length : visibleItems.length}
+        kindCounts={kindCounts}
         gridSize={gridSize}
         onChange={updateQuery}
         onGridSizeChange={setGridSize}

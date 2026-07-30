@@ -4,7 +4,6 @@ import {
   CircleDollarSign,
   Film,
   FolderOpen,
-  UsersRound,
 } from "lucide-react";
 import type { ProjectSummary, WorkspaceSummary } from "../lib/ipc";
 import { sortProjects } from "../state/workbench";
@@ -66,17 +65,6 @@ export function WorkspaceScreen({
             {projectsWithSpend.length === 0 ? "—" : `$${spend.toFixed(2)}`}
           </span>
           <span className="metric-label">Indexed project spend</span>
-        </div>
-      </section>
-
-      <section className="workspace-shortcuts" aria-label="Workspace media">
-        <div className="shortcut-row">
-          <UsersRound size={16} />
-          <span><strong>Units</strong><small>{workspace.unitCount} reusable assets</small></span>
-        </div>
-        <div className="shortcut-row">
-          <Boxes size={16} />
-          <span><strong>Shared library</strong><small>{workspace.sharedCount} references</small></span>
         </div>
       </section>
 

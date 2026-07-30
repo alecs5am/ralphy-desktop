@@ -19,6 +19,14 @@ export const defaultMediaQuery: MediaQueryOptions = {
   includeIntermediate: false,
 };
 
+export function resetProjectQuery(query: MediaQueryOptions): MediaQueryOptions {
+  return {
+    ...defaultMediaQuery,
+    mode: query.mode,
+    includeIntermediate: query.includeIntermediate,
+  };
+}
+
 const modeEntities: Partial<Record<MediaQueryOptions["mode"], MediaEntity[]>> = {
   finals: ["final-render"],
   assets: ["generated-artifact"],

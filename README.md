@@ -64,10 +64,7 @@ bun run benchmark /path/to/repository/.ralphy
 
 ## Package for macOS
 
-Icon generation requires `rsvg-convert` from Homebrew's `librsvg` package.
-
 ```bash
-brew install librsvg
 bun run package:mac
 ```
 

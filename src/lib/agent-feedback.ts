@@ -4,8 +4,20 @@ import type {
   ProjectSummary,
 } from "../../electron/media/types";
 
+export const AGENT_FEEDBACK_LIMIT_CHARS = 1_900_000;
+
 function money(value: number | null): string {
   return value === null ? "unknown" : `$${value.toFixed(2)}`;
+}
+
+function boundedFeedback(value: string): string {
+  if (value.length <= AGENT_FEEDBACK_LIMIT_CHARS) return value;
+  const suffix =
+    "\n\n[Feedback truncated to clipboard limit. Continue the review in smaller batches.]";
+  let body = value.slice(0, AGENT_FEEDBACK_LIMIT_CHARS - suffix.length);
+  const last = body.charCodeAt(body.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) body = body.slice(0, -1);
+  return `${body}${suffix}`;
 }
 
 export function formatAgentFeedback(
@@ -36,5 +48,5 @@ export function formatAgentFeedback(
     lines.push("");
   }
   lines.push("Please use these paths directly and apply the review notes to the next iteration.");
-  return lines.join("\n");
+  return boundedFeedback(lines.join("\n"));
 }

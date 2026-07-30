@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import { InvalidLibraryRootError } from "../electron/media/catalog";
 import {
   ActiveRootResource,
+  createSingleFlight,
   guardedResult,
   guardedSideEffect,
   MediaSessionState,
@@ -31,6 +32,26 @@ function resource(start: () => Promise<boolean> = async () => true): {
     close: vi.fn(),
   };
 }
+
+describe("single-flight operations", () => {
+  test("shares one in-flight restore and allows a later retry", async () => {
+    const run = createSingleFlight<number>();
+    const pending = deferred<number>();
+    const firstStart = vi.fn(() => pending.promise);
+    const duplicateStart = vi.fn(async () => 99);
+
+    const first = run(firstStart);
+    const duplicate = run(duplicateStart);
+
+    expect(duplicate).toBe(first);
+    expect(firstStart).toHaveBeenCalledOnce();
+    expect(duplicateStart).not.toHaveBeenCalled();
+
+    pending.resolve(7);
+    await expect(first).resolves.toBe(7);
+    await expect(run(async () => 8)).resolves.toBe(8);
+  });
+});
 
 describe("media session epochs", () => {
   test("rejects a delayed older open before it can replace a newer root", async () => {

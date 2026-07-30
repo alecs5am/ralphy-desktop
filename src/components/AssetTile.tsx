@@ -8,7 +8,7 @@ import {
   Star,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { MediaAnnotation, MediaItem } from "../lib/ipc";
+import type { MediaAnnotation, MediaItem, ReviewStatus } from "../lib/ipc";
 import { bridge } from "../lib/ipc";
 import { previewScheduler } from "../lib/media";
 
@@ -19,6 +19,14 @@ interface AssetTileProps {
   onSelect(): void;
   onOpen(): void;
 }
+
+const reviewDots: Record<ReviewStatus, string> = {
+  Unreviewed: "idle",
+  Approved: "ok",
+  Shortlist: "accent",
+  "Needs Work": "warn",
+  Reject: "danger",
+};
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -94,13 +102,16 @@ export function AssetTile({
     >
       <span className="asset-preview">
         <Preview item={item} />
-        <span className="asset-extension">{item.extension.replace(".", "") || "file"}</span>
+        <span className="asset-extension">
+          {(item.extension.replace(".", "") || "file").toLocaleUpperCase()}
+        </span>
         {item.generation?.costUsd !== null && item.generation?.costUsd !== undefined && (
           <span className="asset-cost">${item.generation.costUsd.toFixed(2)}</span>
         )}
         {annotation?.favorite && <Heart className="favorite-mark" size={13} fill="currentColor" />}
         {status !== "Unreviewed" && (
           <span className={`review-mark review-${status.toLocaleLowerCase().replace(" ", "-")}`}>
+            <span className={`status-dot dot-${reviewDots[status]}`} />
             {status}
           </span>
         )}

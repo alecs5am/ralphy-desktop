@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { ContextSidebar } from "./components/ContextSidebar";
 import { Inspector } from "./components/Inspector";
-import { Titlebar } from "./components/Titlebar";
+import { MainHeader } from "./components/Titlebar";
 import {
   bridge,
   type MediaAnnotation,
@@ -31,12 +31,14 @@ export function App() {
   const [projectLoading, setProjectLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [inspectorVisible, setInspectorVisible] = useState(false);
+  const [sidebarSearchRequest, setSidebarSearchRequest] = useState(0);
   const [includeIntermediate, setIncludeIntermediate] = useState(false);
   const [annotations, setAnnotations] = useState<Record<string, MediaAnnotation>>({});
   const [selectedAsset, setSelectedAsset] = useState<MediaItem | null>(null);
   const [viewer, setViewer] = useState<{ itemId: string; items: MediaItem[] } | null>(null);
   const projectRequest = useRef(0);
   const annotationRequests = useRef(new Map<string, number>());
+  const restorationStarted = useRef(false);
 
   const catalog = state.catalog;
   const workspaces = catalog?.workspaces ?? [];
@@ -66,40 +68,43 @@ export function App() {
       }
     });
 
-    void bridge
-      .restoreLibrary()
-      .then((result) => {
-        if (!result) return;
-        dispatch({ type: "library-opened", catalog: result.catalog });
-        void bridge.loadAnnotations().then((store) => setAnnotations(store.items));
-        const saved = initialPreferences.current;
-        if (saved.rootPath !== result.rootPath || !saved.workspaceId) return;
-        const workspaceExists = result.catalog.workspaces.some(
-          (workspace) => workspace.id === saved.workspaceId,
-        );
-        if (!workspaceExists) return;
-        dispatch({ type: "open-workspace", workspaceId: saved.workspaceId });
-        if (
-          saved.projectId &&
-          result.catalog.projects.some(
-            (project) =>
-              project.workspaceId === saved.workspaceId &&
-              project.projectId === saved.projectId,
-          )
-        ) {
-          dispatch({
-            type: "open-project",
-            project: {
-              workspaceId: saved.workspaceId,
-              projectId: saved.projectId,
-            },
-          });
-        }
-      })
-      .catch((cause: unknown) => {
-        setError(cause instanceof Error ? cause.message : String(cause));
-      })
-      .finally(() => setRestoring(false));
+    if (!restorationStarted.current) {
+      restorationStarted.current = true;
+      void bridge
+        .restoreLibrary()
+        .then((result) => {
+          if (!result) return;
+          dispatch({ type: "library-opened", catalog: result.catalog });
+          void bridge.loadAnnotations().then((store) => setAnnotations(store.items));
+          const saved = initialPreferences.current;
+          if (saved.rootPath !== result.rootPath || !saved.workspaceId) return;
+          const workspaceExists = result.catalog.workspaces.some(
+            (workspace) => workspace.id === saved.workspaceId,
+          );
+          if (!workspaceExists) return;
+          dispatch({ type: "open-workspace", workspaceId: saved.workspaceId });
+          if (
+            saved.projectId &&
+            result.catalog.projects.some(
+              (project) =>
+                project.workspaceId === saved.workspaceId &&
+                project.projectId === saved.projectId,
+            )
+          ) {
+            dispatch({
+              type: "open-project",
+              project: {
+                workspaceId: saved.workspaceId,
+                projectId: saved.projectId,
+              },
+            });
+          }
+        })
+        .catch((cause: unknown) => {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        })
+        .finally(() => setRestoring(false));
+    }
 
     return unsubscribe;
   }, []);
@@ -191,7 +196,7 @@ export function App() {
         dispatch({ type: "forward" });
       } else if (event.metaKey && event.key.toLocaleLowerCase() === "f") {
         event.preventDefault();
-        document.querySelector<HTMLInputElement>(".sidebar-search input")?.focus();
+        setSidebarSearchRequest((request) => request + 1);
       }
     };
     const onMouseUp = (event: MouseEvent) => {
@@ -216,12 +221,13 @@ export function App() {
     });
   };
 
-  const breadcrumbs = ["Ralphy"];
-  if (selectedWorkspace) breadcrumbs.push(selectedWorkspace.name);
-  if (selectedProject) breadcrumbs.push(selectedProject.name);
   const viewerItem = viewer?.items.find((item) => item.id === viewer.itemId) ?? null;
   const viewerItems = viewer?.items ?? [];
-  if (viewerItem) breadcrumbs.push(viewerItem.name);
+  const breadcrumbs = selectedProject
+    ? [selectedProject.name, viewerItem?.name ?? "Project"]
+    : selectedWorkspace
+      ? [selectedWorkspace.name]
+      : ["Workspaces"];
 
   const updateAnnotation = async (item: MediaItem, input: Parameters<typeof bridge.updateAnnotations>[0][string]) => {
     const request = (annotationRequests.current.get(item.id) ?? 0) + 1;
@@ -340,28 +346,20 @@ export function App() {
 
   return (
     <div className={`workbench${showInspector ? " has-inspector" : ""}`}>
-      <Titlebar
-        breadcrumbs={breadcrumbs}
-        canGoBack={viewerItem !== null || state.historyIndex > 0}
-        canGoForward={state.historyIndex < state.history.length - 1}
-        canToggleInspector={
-          state.route.kind === "project" && selectedAsset !== null
-        }
-        inspectorVisible={
-          state.route.kind === "project" && inspectorVisible && selectedAsset !== null
-        }
-        onBack={navigateBack}
-        onForward={() => dispatch({ type: "forward" })}
-        onChooseLibrary={chooseLibrary}
-        onToggleInspector={() => setInspectorVisible((visible) => !visible)}
-      />
       {catalog && (
         <ContextSidebar
           route={state.route}
+          rootPath={catalog.rootPath}
           workspaces={workspaces}
           projects={projects}
           pinnedWorkspaceIds={state.pinnedWorkspaceIds}
           pinnedProjectIds={state.pinnedProjectIds}
+          searchRequest={sidebarSearchRequest}
+          canGoBack={viewerItem !== null || state.historyIndex > 0}
+          canGoForward={state.historyIndex < state.history.length - 1}
+          onBack={navigateBack}
+          onForward={() => dispatch({ type: "forward" })}
+          onChooseLibrary={chooseLibrary}
           onOpenLibrary={() => dispatch({ type: "open-library" })}
           onOpenWorkspace={(workspaceId) => dispatch({ type: "open-workspace", workspaceId })}
           onOpenProject={openProject}
@@ -373,7 +371,21 @@ export function App() {
           }
         />
       )}
-      {content}
+      <section className="main-shell">
+        <MainHeader
+          breadcrumbs={breadcrumbs}
+          canToggleInspector={
+            state.route.kind === "project" && selectedAsset !== null
+          }
+          inspectorVisible={
+            state.route.kind === "project" && inspectorVisible && selectedAsset !== null
+          }
+          showChooseLibrary={!catalog}
+          onChooseLibrary={chooseLibrary}
+          onToggleInspector={() => setInspectorVisible((visible) => !visible)}
+        />
+        {content}
+      </section>
       {showInspector && (
         <Inspector
           item={selectedAsset}
