@@ -3,6 +3,7 @@ import Foundation
 public enum MetadataStoreError: Error, Equatable, Sendable {
     case corruptFile(URL)
     case conflict(URL)
+    case unsupportedFutureSchema(URL, Int)
 }
 
 public struct MetadataStore: Sendable {
@@ -22,12 +23,8 @@ public struct MetadataStore: Sendable {
         self.sessionID = UUID()
         if FileManager.default.fileExists(atPath: metadataURL.path) {
             let data = try Data(contentsOf: metadataURL)
-            do {
-                self.annotations = try JSONDecoder.ralphy.decode(Payload.self, from: data).annotations
-                self.revision = .contents(data)
-            } catch {
-                throw MetadataStoreError.corruptFile(metadataURL)
-            }
+            self.annotations = try decodePayload(from: data, at: metadataURL).annotations
+            self.revision = .contents(data)
         } else {
             self.annotations = [:]
             self.revision = .missing
@@ -56,6 +53,8 @@ extension MetadataStoreError: LocalizedError {
             "Metadata is corrupt at \(url.path). Repair or move that file before saving annotations."
         case .conflict(let url):
             "Metadata changed outside Ralphy Media at \(url.path). Reopen the library before saving annotations."
+        case .unsupportedFutureSchema(let url, let version):
+            "Metadata at \(url.path) uses unsupported schema version \(version). Update Ralphy Media before saving annotations."
         }
     }
 }
@@ -69,20 +68,18 @@ private enum Revision: Equatable, Sendable {
             return .missing
         }
         let data = try Data(contentsOf: url)
-        do {
-            _ = try JSONDecoder.ralphy.decode(Payload.self, from: data)
-        } catch {
-            throw MetadataStoreError.corruptFile(url)
-        }
+        _ = try decodePayload(from: data, at: url)
         return .contents(data)
     }
 }
 
 private struct Payload: Codable {
+    static let currentSchemaVersion = 1
+
     let schemaVersion: Int
     var annotations: [String: MediaAnnotation]
 
-    init(schemaVersion: Int = 1, annotations: [String: MediaAnnotation]) {
+    init(schemaVersion: Int = currentSchemaVersion, annotations: [String: MediaAnnotation]) {
         self.schemaVersion = schemaVersion
         self.annotations = annotations
     }
@@ -94,8 +91,25 @@ private struct Payload: Codable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? Self.currentSchemaVersion
+        guard schemaVersion <= Self.currentSchemaVersion else {
+            throw UnsupportedFutureSchemaVersion(version: schemaVersion)
+        }
         annotations = try container.decode([String: MediaAnnotation].self, forKey: .annotations)
+    }
+}
+
+private struct UnsupportedFutureSchemaVersion: Error {
+    let version: Int
+}
+
+private func decodePayload(from data: Data, at url: URL) throws -> Payload {
+    do {
+        return try JSONDecoder.ralphy.decode(Payload.self, from: data)
+    } catch let error as UnsupportedFutureSchemaVersion {
+        throw MetadataStoreError.unsupportedFutureSchema(url, error.version)
+    } catch {
+        throw MetadataStoreError.corruptFile(url)
     }
 }
 

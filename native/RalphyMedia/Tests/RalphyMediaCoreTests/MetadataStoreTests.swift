@@ -84,3 +84,57 @@ import Testing
     }
     #expect(try Data(contentsOf: fileURL) == corruptBytes)
 }
+
+@Test func metadataStoreRejectsFutureSchemaWithoutRewritingUnknownData() throws {
+    let root = try TemporaryRalphy.make()
+    let fileURL = root.url.appending(path: "media-library/library.json")
+    var stale = try MetadataStore(root: root.url)
+    let futureBytes = Data(
+        """
+        {
+          "schemaVersion": 2,
+          "annotations": {},
+          "futureSentinel": {"mustSurvive": true}
+        }
+        """.utf8
+    )
+    try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try futureBytes.write(to: fileURL)
+
+    #expect(throws: MetadataStoreError.unsupportedFutureSchema(fileURL, 2)) {
+        _ = try MetadataStore(root: root.url)
+    }
+
+    stale.annotations["item"] = MediaAnnotation(note: "must not save")
+    #expect(throws: MetadataStoreError.unsupportedFutureSchema(fileURL, 2)) {
+        try stale.save()
+    }
+    #expect(try Data(contentsOf: fileURL) == futureBytes)
+}
+
+@Test func metadataStoreLoadsMissingSchemaAndLegacyRejectedAnnotation() throws {
+    let root = try TemporaryRalphy.make()
+    let fileURL = root.url.appending(path: "media-library/library.json")
+    let legacyBytes = Data(
+        """
+        {
+          "annotations": {
+            "legacy.mp4": {
+              "rating": 0,
+              "favorite": false,
+              "rejected": true,
+              "tags": [],
+              "note": "",
+              "updatedAt": "1970-01-01T00:00:01Z"
+            }
+          }
+        }
+        """.utf8
+    )
+    try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try legacyBytes.write(to: fileURL)
+
+    let store = try MetadataStore(root: root.url)
+
+    #expect(store.annotations["legacy.mp4"]?.verdict == .reject)
+}
