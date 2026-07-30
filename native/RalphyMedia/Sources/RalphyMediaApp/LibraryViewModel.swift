@@ -441,7 +441,11 @@ final class LibraryViewModel: ObservableObject {
         if pendingAnnotationSaves[root] != nil {
             Task { [weak self] in
                 guard let self else { return }
-                switch await self.flushPendingAnnotationSave(for: root) {
+                let outcome = await self.flushPendingAnnotationSave(for: root)
+                guard generation == self.rootLoadGeneration,
+                      !self.isTrashing,
+                      !self.isTerminating else { return }
+                switch outcome {
                 case .saved:
                     self.openValidatedRoot(root, generation: generation)
                 case .reloadRequired:

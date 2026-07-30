@@ -367,6 +367,53 @@ func pendingRootLoadCannotCompleteAfterTrashStarts() async throws {
     try await waitUntil { !viewModel.isTrashing }
 }
 
+@Test @MainActor
+func invalidatedRootLoadConflictKeepsPendingAnnotations() async throws {
+    let fixture = try ResponsiveLibraryFixture(filenames: ["remove.png"])
+    defer { fixture.remove() }
+    let metadataURL = fixture.rootURL.appending(path: "media-library/library.json")
+    let saves = BlockingAnnotationSaveOperation(
+        failure: .conflict(metadataURL)
+    )
+    let trash = BlockingTrashOperation()
+    defer {
+        Task { await saves.releaseAll() }
+        trash.releaseRemove()
+    }
+    let viewModel = LibraryViewModel(
+        settings: fixture.settings,
+        trashItem: trash.trash,
+        annotationSave: { store in
+            try await saves.save(store)
+        }
+    )
+
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntil {
+        !viewModel.isScanning
+            && !viewModel.isApplyingQuery
+            && viewModel.visibleItems.count == 1
+    }
+    let item = try #require(viewModel.visibleItems.first)
+    viewModel.select(item)
+    viewModel.setVerdict(.keep)
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntilAsync { await saves.startedCount >= 1 }
+
+    viewModel.requestTrash()
+    viewModel.confirmTrash()
+    try await waitUntil { trash.removeStarted }
+
+    await saves.releaseAll()
+    try await waitUntil { viewModel.errorMessage != nil }
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(viewModel.hasPendingAnnotationSaves)
+    #expect(viewModel.annotation(for: item).verdict == .keep)
+
+    trash.releaseRemove()
+    try await waitUntil { !viewModel.isTrashing }
+}
+
 @MainActor
 private func waitUntil(
     timeout: Duration = .seconds(8),
@@ -505,14 +552,22 @@ private final class BlockingTrashOperation: @unchecked Sendable {
 }
 
 private actor BlockingAnnotationSaveOperation {
+    private let failure: MetadataStoreError?
     private(set) var startedCount = 0
     private var released = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(failure: MetadataStoreError? = nil) {
+        self.failure = failure
+    }
 
     func save(_ store: MetadataStore) async throws -> MetadataStore {
         startedCount += 1
         if !released {
             await withCheckedContinuation { waiters.append($0) }
+        }
+        if let failure {
+            throw failure
         }
         return store
     }
