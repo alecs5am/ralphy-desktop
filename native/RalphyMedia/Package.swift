@@ -19,5 +19,9 @@ let package = Package(
             name: "RalphyMediaCoreTests",
             dependencies: ["RalphyMediaCore"]
         ),
+        .testTarget(
+            name: "RalphyMediaAppTests",
+            dependencies: ["RalphyMediaApp"]
+        ),
     ]
 )

@@ -134,6 +134,11 @@ final class LibraryViewModel: ObservableObject {
         set { updateQuery { $0.bucket = newValue } }
     }
 
+    var selectedVerdict: ReviewVerdict? {
+        get { query.verdict }
+        set { updateQuery { $0.verdict = newValue } }
+    }
+
     var favoriteOnly: Bool {
         get { query.favoriteOnly }
         set { updateQuery { $0.favoriteOnly = newValue } }
@@ -142,6 +147,14 @@ final class LibraryViewModel: ObservableObject {
     var showRejected: Bool {
         get { !query.excludeRejected }
         set { updateQuery { $0.excludeRejected = !newValue } }
+    }
+
+    var favoriteCount: Int {
+        items.count(where: { annotation(for: $0).favorite })
+    }
+
+    func count(for verdict: ReviewVerdict) -> Int {
+        items.count(where: { annotation(for: $0).verdict == verdict })
     }
 
     func restoreLastLibrary() {
@@ -253,6 +266,23 @@ final class LibraryViewModel: ObservableObject {
         selectionAnchorID = nil
     }
 
+    func selectAdjacent(forward: Bool, extending: Bool = false) {
+        guard !visibleItems.isEmpty else { return }
+        let currentIndex = primarySelectionID.flatMap { selectedID in
+            visibleItems.firstIndex(where: { $0.id == selectedID })
+        }
+        let targetIndex: Int
+        if let currentIndex {
+            targetIndex = min(
+                visibleItems.count - 1,
+                max(0, currentIndex + (forward ? 1 : -1))
+            )
+        } else {
+            targetIndex = forward ? 0 : visibleItems.count - 1
+        }
+        select(visibleItems[targetIndex], shift: extending)
+    }
+
     func annotation(for item: MediaItem) -> MediaAnnotation {
         annotations[item.relativePath] ?? MediaAnnotation()
     }
@@ -293,6 +323,10 @@ final class LibraryViewModel: ObservableObject {
         mutateAnnotations(for: selectedItems) {
             $0.tags.removeAll { removed.contains($0.lowercased()) }
         }
+    }
+
+    func setNote(_ note: String) {
+        mutateAnnotations(for: selectedItems) { $0.note = note }
     }
 
     func showQuickLook() {
