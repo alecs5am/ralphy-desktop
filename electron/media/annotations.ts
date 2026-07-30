@@ -1,13 +1,13 @@
 import {
   lstat,
   mkdir,
-  open,
   readFile,
-  rename,
-  rm,
 } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import {
+  guardedAtomicWrite,
+  type RenameFile,
+} from "./atomic-write";
 import { resolveContainedPath, validateLibraryRoot } from "./catalog";
 import type {
   AnnotationInput,
@@ -29,6 +29,15 @@ const REVIEW_STATUSES = new Set<ReviewStatus>([
   "Reject",
 ]);
 const writes = new Map<string, Promise<unknown>>();
+
+export interface AnnotationOperationOptions {
+  assertCurrent?: () => void;
+  renameFile?: RenameFile;
+}
+
+function assertCurrent(options: AnnotationOperationOptions): void {
+  options.assertCurrent?.();
+}
 
 function assertWritableVersion(version: number): void {
   if (version > CURRENT_VERSION) {
@@ -146,88 +155,107 @@ async function paths(rootPath: string): Promise<{
   return { root, directory, store: join(directory, "library.json") };
 }
 
-async function ensureStoreDirectory(rootPath: string, directory: string): Promise<void> {
+async function ensureStoreDirectory(
+  rootPath: string,
+  directory: string,
+  options: AnnotationOperationOptions,
+): Promise<void> {
   const info = await lstat(directory).catch(() => null);
+  assertCurrent(options);
   if (info?.isSymbolicLink() || (info && !info.isDirectory())) {
     throw new Error("Annotation directory must be a real directory");
   }
-  if (!info) await mkdir(directory);
+  if (!info) {
+    assertCurrent(options);
+    await mkdir(directory);
+  }
   await resolveContainedPath(rootPath, directory);
+  assertCurrent(options);
 }
 
-export async function loadAnnotations(rootPath: string): Promise<AnnotationStore> {
+export async function loadAnnotations(
+  rootPath: string,
+  options: AnnotationOperationOptions = {},
+): Promise<AnnotationStore> {
+  assertCurrent(options);
   const { root, store } = await paths(rootPath);
+  assertCurrent(options);
   const info = await lstat(store).catch(() => null);
+  assertCurrent(options);
   if (!info) return { version: CURRENT_VERSION, items: {} };
   const safeStore = await resolveContainedPath(root, store);
+  assertCurrent(options);
   if (!info.isFile() || info.size > STORE_LIMIT_BYTES) {
     return { version: CURRENT_VERSION, items: {} };
   }
+  let result: AnnotationStore;
   try {
-    return normalizeStore(JSON.parse(await readFile(safeStore, "utf8")));
+    const data = await readFile(safeStore, "utf8");
+    result = normalizeStore(JSON.parse(data));
   } catch {
-    return { version: CURRENT_VERSION, items: {} };
+    result = { version: CURRENT_VERSION, items: {} };
   }
+  assertCurrent(options);
+  return result;
 }
 
 export async function saveAnnotations(
   rootPath: string,
   value: AnnotationStore,
+  options: AnnotationOperationOptions = {},
 ): Promise<AnnotationStore> {
+  assertCurrent(options);
   assertWritableVersion(value.version);
   const normalized = normalizeStore(value);
   const { root, directory, store } = await paths(rootPath);
-  await ensureStoreDirectory(root, directory);
+  assertCurrent(options);
+  await ensureStoreDirectory(root, directory, options);
   const existing = await lstat(store).catch(() => null);
+  assertCurrent(options);
   if (existing?.isSymbolicLink() || (existing && !existing.isFile())) {
     throw new Error("Annotation store must be a regular file");
   }
 
-  const temporary = join(directory, `.library.${randomUUID()}.tmp`);
   const data = `${JSON.stringify(normalized, null, 2)}\n`;
   if (Buffer.byteLength(data) > STORE_LIMIT_BYTES) {
     throw new Error("Annotation store is too large");
   }
-  const file = await open(temporary, "wx", 0o600);
-  try {
-    await file.writeFile(data);
-    await file.sync();
-    await file.close();
-    await rename(temporary, store);
-    const directoryHandle = await open(directory, "r");
-    try {
-      await directoryHandle.sync();
-    } finally {
-      await directoryHandle.close();
-    }
-  } catch (error) {
-    await file.close().catch(() => undefined);
-    await rm(temporary, { force: true }).catch(() => undefined);
-    throw error;
-  }
+  await guardedAtomicWrite(store, data, {
+    maxBytes: STORE_LIMIT_BYTES,
+    assertCurrent: options.assertCurrent,
+    renameFile: options.renameFile,
+  });
+  assertCurrent(options);
   return normalized;
 }
 
 export async function updateAnnotations(
   rootPath: string,
   value: unknown,
+  options: AnnotationOperationOptions = {},
 ): Promise<AnnotationStore> {
+  assertCurrent(options);
   const updates = validateAnnotationUpdates(value);
   const root = await validateLibraryRoot(rootPath);
+  assertCurrent(options);
   const previous = writes.get(root) ?? Promise.resolve();
   const next = previous.catch(() => undefined).then(async () => {
-    const current = await loadAnnotations(root);
+    assertCurrent(options);
+    const current = await loadAnnotations(root, options);
     assertWritableVersion(current.version);
+    assertCurrent(options);
     const updatedAt = new Date().toISOString();
     for (const [id, annotation] of Object.entries(updates)) {
       if (!id) continue;
       current.items[id] = normalizeAnnotation({ ...annotation, updatedAt });
     }
-    return saveAnnotations(root, current);
+    return saveAnnotations(root, current, options);
   });
   writes.set(root, next);
   try {
-    return await next;
+    const result = await next;
+    assertCurrent(options);
+    return result;
   } finally {
     if (writes.get(root) === next) writes.delete(root);
   }

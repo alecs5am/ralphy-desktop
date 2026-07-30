@@ -41,9 +41,16 @@ export class MediaProtocolAccess {
     }
   }
 
-  async mint(rootPath: string, requestedPath: string): Promise<string> {
+  async mint(
+    rootPath: string,
+    requestedPath: string,
+    assertCurrent: () => void = () => undefined,
+  ): Promise<string> {
+    assertCurrent();
     const path = await this.resolveFile(rootPath, requestedPath);
+    assertCurrent();
     await this.#validatePreview(path);
+    assertCurrent();
     const existing = this.#tokensByPath.get(path);
     if (existing) return existing;
 
@@ -59,11 +66,18 @@ export class MediaProtocolAccess {
     return token;
   }
 
-  async resolve(rootPath: string, token: string): Promise<string> {
+  async resolve(
+    rootPath: string,
+    token: string,
+    assertCurrent: () => void = () => undefined,
+  ): Promise<string> {
+    assertCurrent();
     const path = this.#pathsByToken.get(token);
     if (!path) throw new Error("Unknown media token");
     const resolved = await this.resolveFile(rootPath, path);
+    assertCurrent();
     await this.#validatePreview(resolved);
+    assertCurrent();
     return resolved;
   }
 
@@ -107,11 +121,22 @@ export async function trashAuthorizedItems(
   paths: string[],
   access: MediaProtocolAccess,
   trashItem: (path: string) => Promise<void>,
+  assertCurrent: () => void = () => undefined,
 ): Promise<TrashResult> {
   const result: TrashResult = { trashed: [], failed: [] };
   for (const path of paths) {
+    let authorizedPath: string;
     try {
-      const authorizedPath = await access.resolveFile(rootPath, path);
+      authorizedPath = await access.resolveFile(rootPath, path);
+    } catch (error) {
+      result.failed.push({
+        path,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
+    assertCurrent();
+    try {
       await trashItem(authorizedPath);
       result.trashed.push(authorizedPath);
     } catch (error) {
@@ -120,6 +145,8 @@ export async function trashAuthorizedItems(
         error: error instanceof Error ? error.message : String(error),
       });
     }
+    assertCurrent();
   }
+  assertCurrent();
   return result;
 }

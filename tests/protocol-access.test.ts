@@ -1,12 +1,13 @@
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   MediaProtocolAccess,
   trashAuthorizedItems,
 } from "../electron/media/protocol-access";
 import { scanProject } from "../electron/media/project-scanner";
 import { makeLibraryFixture, type LibraryFixture } from "./fixtures";
+import { MediaSessionState } from "../electron/media/session";
 
 let fixture: LibraryFixture | undefined;
 
@@ -128,5 +129,34 @@ describe("media protocol access", () => {
     expect(trashed[0]).toMatch(/misc\.bin$/);
     expect(result.trashed).toEqual(trashed);
     expect(result.failed.map((failure) => failure.path)).toEqual([registry, inactive]);
+  });
+
+  test("rejects Trash when a root switch wins delayed file authorization", async () => {
+    const state = new MediaSessionState();
+    const firstRoot = "/tmp/first/.ralphy";
+    const secondRoot = "/tmp/second/.ralphy";
+    state.activateRoot(firstRoot);
+    const operation = state.captureActive();
+    let resolvePath!: (path: string) => void;
+    const resolvedPath = new Promise<string>((resolve) => {
+      resolvePath = resolve;
+    });
+    const access = {
+      resolveFile: () => resolvedPath,
+    } as unknown as MediaProtocolAccess;
+    const trashItem = vi.fn(async () => undefined);
+    const pending = trashAuthorizedItems(
+      firstRoot,
+      ["/tmp/first/.ralphy/file.mp4"],
+      access,
+      trashItem,
+      () => state.assertActive(operation),
+    );
+
+    state.activateRoot(secondRoot);
+    resolvePath("/tmp/first/.ralphy/file.mp4");
+
+    await expect(pending).rejects.toThrow(/stale media session/i);
+    expect(trashItem).not.toHaveBeenCalled();
   });
 });

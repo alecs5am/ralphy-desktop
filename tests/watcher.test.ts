@@ -69,4 +69,30 @@ describe("watcher lifecycle", () => {
 
     expect(onCatalogChange).not.toHaveBeenCalled();
   });
+
+  test("closes the root watcher when recursive workspace watch creation fails", async () => {
+    fixture = await makeLibraryFixture();
+    const closeRoot = vi.fn();
+    const rootWatcher = {
+      close: closeRoot,
+      on: vi.fn().mockReturnThis(),
+    };
+    const watchFileSystem = vi.fn()
+      .mockReturnValueOnce(rootWatcher)
+      .mockImplementationOnce(() => {
+        throw new Error("recursive watch unavailable");
+      });
+    const watcher = new LibraryWatcher({
+      rootPath: fixture.rootPath,
+      selectedProject: () => null,
+      onCatalogChange: () => undefined,
+      onSelectedProjectChange: () => undefined,
+      watchFileSystem: watchFileSystem as unknown as typeof import("node:fs").watch,
+    });
+
+    await expect(watcher.start()).rejects.toThrow("recursive watch unavailable");
+    expect(closeRoot).toHaveBeenCalledOnce();
+    watcher.close();
+    expect(closeRoot).toHaveBeenCalledOnce();
+  });
 });

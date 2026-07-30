@@ -15,6 +15,7 @@ export interface LibraryWatcherOptions {
   onSelectedProjectChange: () => void;
   onError?: (error: Error) => void;
   debounceMs?: number;
+  watchFileSystem?: typeof watch;
 }
 
 const CATALOG_PROJECT_FILES = new Set([
@@ -91,28 +92,41 @@ export class LibraryWatcher {
       if (route.selectedProject) this.#debounceProject();
     };
     const onError = (error: Error): void => this.#options.onError?.(error);
-    const rootWatcher = watch(this.#rootPath, (event, filename) => {
-      void event;
-      handle(this.#rootPath, filename);
-    });
-    rootWatcher.on("error", onError);
-    const workspacesPath = join(this.#rootPath, "workspaces");
-    const workspaceWatcher = watch(
-      workspacesPath,
-      { recursive: true },
-      (event, filename) => {
+    const watchFileSystem = this.#options.watchFileSystem ?? watch;
+    try {
+      const rootWatcher = watchFileSystem(this.#rootPath, (event, filename) => {
         void event;
-        handle(workspacesPath, filename);
-      },
-    );
-    workspaceWatcher.on("error", onError);
-    this.#watchers = [rootWatcher, workspaceWatcher];
-    return true;
+        handle(this.#rootPath, filename);
+      });
+      this.#watchers.push(rootWatcher);
+      rootWatcher.on("error", onError);
+      const workspacesPath = join(this.#rootPath, "workspaces");
+      const workspaceWatcher = watchFileSystem(
+        workspacesPath,
+        { recursive: true },
+        (event, filename) => {
+          void event;
+          handle(workspacesPath, filename);
+        },
+      );
+      this.#watchers.push(workspaceWatcher);
+      workspaceWatcher.on("error", onError);
+      return true;
+    } catch (error) {
+      this.close();
+      throw error;
+    }
   }
 
   close(): void {
     this.#lifecycleGeneration += 1;
-    for (const watcher of this.#watchers) watcher.close();
+    for (const watcher of this.#watchers) {
+      try {
+        watcher.close();
+      } catch {
+        // Continue closing the remaining filesystem handles.
+      }
+    }
     this.#watchers = [];
     if (this.#catalogTimer) clearTimeout(this.#catalogTimer);
     if (this.#projectTimer) clearTimeout(this.#projectTimer);

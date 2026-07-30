@@ -1,104 +1,247 @@
 import { describe, expect, test, vi } from "vitest";
 import {
   ActiveRootResource,
+  guardedResult,
+  guardedSideEffect,
   MediaSessionState,
   sendIfWindowAlive,
   StaleMediaSessionError,
   stopMediaRuntime,
 } from "../electron/media/session";
 
-describe("media session lifecycle", () => {
-  test("rejects callbacks from the previous root without invalidating the current catalog", () => {
-    const state = new MediaSessionState();
-    const firstRoot = "/tmp/first/.ralphy";
-    const secondRoot = "/tmp/second/.ralphy";
-    state.activateRoot(firstRoot);
-    const firstGeneration = state.beginCatalog(firstRoot);
-    state.activateRoot(secondRoot);
-    const secondGeneration = state.beginCatalog(secondRoot);
-
-    expect(() => state.beginCatalog(firstRoot)).toThrow(StaleMediaSessionError);
-    expect(() => state.acceptCatalog(firstRoot, firstGeneration)).toThrow(StaleMediaSessionError);
-    expect(() => state.acceptCatalog(secondRoot, secondGeneration)).not.toThrow();
+function deferred<Value>(): {
+  promise: Promise<Value>;
+  resolve(value: Value): void;
+} {
+  let resolve!: (value: Value) => void;
+  const promise = new Promise<Value>((accept) => {
+    resolve = accept;
   });
+  return { promise, resolve };
+}
 
-  test("does not let a stale open replace the current watcher or setting", async () => {
+function resource(start: () => Promise<boolean> = async () => true): {
+  start: ReturnType<typeof vi.fn<[], Promise<boolean>>>;
+  close: ReturnType<typeof vi.fn<[], void>>;
+} {
+  return {
+    start: vi.fn(start),
+    close: vi.fn(),
+  };
+}
+
+describe("media session epochs", () => {
+  test("rejects a delayed older open before it can replace a newer root", async () => {
     const state = new MediaSessionState();
-    const resources = new ActiveRootResource<{
-      start(): Promise<boolean>;
-      close(): void;
-    }>();
-    const firstRoot = "/tmp/first/.ralphy";
-    const secondRoot = "/tmp/second/.ralphy";
-    let releaseFirstStart: ((started: boolean) => void) | undefined;
-    const first = {
-      start: vi.fn(() => new Promise<boolean>((resolve) => {
-        releaseFirstStart = resolve;
-      })),
-      close: vi.fn(),
-    };
-    const second = {
-      start: vi.fn(async () => true),
-      close: vi.fn(),
-    };
-    const persisted: string[] = [];
+    state.activateRoot("/tmp/previous/.ralphy");
+    const firstValidation = deferred<string>();
+    const firstOperation = state.beginOpen();
+    const firstOpen = firstValidation.promise.then((root) => (
+      state.completeOpen(firstOperation, root)
+    ));
 
-    state.activateRoot(firstRoot);
-    const firstOpen = resources.replace(
-      state,
-      firstRoot,
-      () => first,
-      async () => {
-        persisted.push(firstRoot);
-      },
-    );
-    await Promise.resolve();
-    expect(first.start).toHaveBeenCalledOnce();
-
-    resources.close();
-    state.activateRoot(secondRoot);
-    const secondOpen = resources.replace(
-      state,
-      secondRoot,
-      () => second,
-      async () => {
-        persisted.push(secondRoot);
-      },
-    );
-    releaseFirstStart?.(true);
+    const secondOperation = state.beginOpen();
+    state.completeOpen(secondOperation, "/tmp/second/.ralphy");
+    firstValidation.resolve("/tmp/first/.ralphy");
 
     await expect(firstOpen).rejects.toThrow(StaleMediaSessionError);
-    await secondOpen;
-    expect(first.close).toHaveBeenCalledOnce();
-    expect(second.start).toHaveBeenCalledOnce();
-    expect(second.close).not.toHaveBeenCalled();
-    expect(persisted).toEqual([secondRoot]);
+    expect(state.requireRoot()).toBe("/tmp/second/.ralphy");
+  });
+
+  test("invalidates a delayed open when runtime stop wins", () => {
+    const state = new MediaSessionState();
+    const root = "/tmp/current/.ralphy";
+    state.activateRoot(root);
+    const delayed = state.beginOpen();
+
+    stopMediaRuntime(state, {});
+    expect(() => state.completeOpen(delayed, root)).toThrow(StaleMediaSessionError);
+    expect(() => state.requireRoot()).toThrow(/active/i);
+  });
+
+  test("invalidates active operations when reopening the same canonical root", () => {
+    const state = new MediaSessionState();
+    const root = "/tmp/current/.ralphy";
+    const original = state.activateRoot(root);
+    const reopened = state.beginOpen();
+
+    const current = state.completeOpen(reopened, root);
+
+    expect(() => state.assertActive(original)).toThrow(StaleMediaSessionError);
+    expect(() => state.assertActive(current)).not.toThrow();
+  });
+
+  test("cancel wins over a project still in asynchronous path validation", async () => {
+    const state = new MediaSessionState();
+    const root = "/tmp/current/.ralphy";
+    state.activateRoot(root);
+    const validation = deferred<void>();
+    const operation = state.beginProjectSelection();
+    const delayedSelection = validation.promise.then(() => state.beginProject(
+      operation,
+      { workspaceId: "studio", projectId: "alpha-001" },
+      { includeIntermediate: true },
+    ));
+
+    state.cancelProject();
+    validation.resolve();
+
+    await expect(delayedSelection).rejects.toThrow(StaleMediaSessionError);
+    expect(state.watcherSelection(root)).toBeNull();
+  });
+
+  test("a newer project selection wins over older delayed validation", () => {
+    const state = new MediaSessionState();
+    const root = "/tmp/current/.ralphy";
+    state.activateRoot(root);
+    const older = state.beginProjectSelection();
+    const newer = state.beginProjectSelection();
+    state.beginProject(newer, { workspaceId: "studio", projectId: "beta-001" });
+
+    expect(newer.epoch).toBeGreaterThan(older.epoch);
+    expect(() => state.beginProject(
+      older,
+      { workspaceId: "studio", projectId: "alpha-001" },
+    )).toThrow(StaleMediaSessionError);
+    expect(state.watcherSelection(root)?.project.projectId).toBe("beta-001");
+  });
+
+  test("a pending open cannot be displaced by stale project or cancel IPC", () => {
+    const state = new MediaSessionState();
+    state.activateRoot("/tmp/first/.ralphy");
+    const opening = state.beginOpen();
+
+    expect(() => state.beginProjectSelection()).toThrow(StaleMediaSessionError);
+    state.cancelProject();
+    expect(() => state.completeOpen(opening, "/tmp/second/.ralphy")).not.toThrow();
+    expect(state.requireRoot()).toBe("/tmp/second/.ralphy");
   });
 
   test("preserves the selected scan policy for watcher refreshes", () => {
     const state = new MediaSessionState();
     const root = "/tmp/current/.ralphy";
     state.activateRoot(root);
+    const operation = state.beginProjectSelection();
     state.beginProject(
+      operation,
       { workspaceId: "studio", projectId: "alpha-001" },
       { includeIntermediate: true },
     );
 
-    expect(state.scanOptionsForWatcher(root)).toEqual({ includeIntermediate: true });
-    state.deselectProject();
-    expect(state.scanOptionsForWatcher(root)).toBeNull();
+    expect(state.watcherSelection(root)).toEqual({
+      operation,
+      project: { workspaceId: "studio", projectId: "alpha-001" },
+      options: { includeIntermediate: true },
+    });
+    state.cancelProject();
+    expect(state.watcherSelection(root)).toBeNull();
   });
 
+  test("rejects a delayed result after switching to another root", async () => {
+    const state = new MediaSessionState();
+    state.activateRoot("/tmp/first/.ralphy");
+    const operation = state.captureActive();
+    const read = deferred<string>();
+    const pending = guardedResult(state, operation, () => read.promise);
+
+    state.activateRoot("/tmp/second/.ralphy");
+    read.resolve("first-root data");
+
+    await expect(pending).rejects.toThrow(StaleMediaSessionError);
+  });
+
+  test("blocks an irreversible side effect prepared for an inactive root", async () => {
+    const state = new MediaSessionState();
+    state.activateRoot("/tmp/first/.ralphy");
+    const operation = state.captureActive();
+    const resolution = deferred<string>();
+    const sideEffect = vi.fn(async () => "opened");
+    const pending = guardedSideEffect(
+      state,
+      operation,
+      () => resolution.promise,
+      sideEffect,
+    );
+
+    state.activateRoot("/tmp/second/.ralphy");
+    resolution.resolve("/tmp/first/.ralphy/file.mp4");
+
+    await expect(pending).rejects.toThrow(StaleMediaSessionError);
+    expect(sideEffect).not.toHaveBeenCalled();
+  });
+});
+
+describe("transactional active resources", () => {
+  test("keeps the previous resource when candidate startup fails", async () => {
+    const state = new MediaSessionState();
+    const active = state.activateRoot("/tmp/current/.ralphy");
+    const resources = new ActiveRootResource<ReturnType<typeof resource>>();
+    const previous = resource();
+    await resources.replace({
+      assertCurrent: () => state.assertActive(active),
+      create: () => previous,
+      commit: () => "previous",
+    });
+    const candidate = resource(async () => {
+      throw new Error("watch failed");
+    });
+
+    await expect(resources.replace({
+      assertCurrent: () => state.assertActive(active),
+      create: () => candidate,
+      commit: () => "candidate",
+    })).rejects.toThrow("watch failed");
+
+    expect(candidate.close).toHaveBeenCalledOnce();
+    expect(previous.close).not.toHaveBeenCalled();
+    resources.close();
+    expect(previous.close).toHaveBeenCalledOnce();
+  });
+
+  test("keeps the previous resource and session when settings commit fails", async () => {
+    const state = new MediaSessionState();
+    const root = "/tmp/current/.ralphy";
+    const active = state.activateRoot(root);
+    const resources = new ActiveRootResource<ReturnType<typeof resource>>();
+    const previous = resource();
+    await resources.replace({
+      assertCurrent: () => state.assertActive(active),
+      create: () => previous,
+      commit: () => "previous",
+    });
+    const candidate = resource();
+    const open = state.beginOpen();
+
+    await expect(resources.replace({
+      assertCurrent: () => state.assertOpen(open),
+      create: () => candidate,
+      prepare: async () => {
+        throw new Error("settings failed");
+      },
+      commit: () => state.completeOpen(open, "/tmp/next/.ralphy"),
+    })).rejects.toThrow("settings failed");
+    state.abortOpen(open);
+
+    expect(candidate.close).toHaveBeenCalledOnce();
+    expect(previous.close).not.toHaveBeenCalled();
+    expect(state.requireRoot()).toBe(root);
+    resources.close();
+    expect(previous.close).toHaveBeenCalledOnce();
+  });
+});
+
+describe("media runtime teardown", () => {
   test("deselects before abort and prevents watchers from reviving the project", () => {
     const state = new MediaSessionState();
     const root = "/tmp/current/.ralphy";
     state.activateRoot(root);
-    state.beginProject({ workspaceId: "studio", projectId: "alpha-001" });
+    const operation = state.beginProjectSelection();
+    state.beginProject(operation, { workspaceId: "studio", projectId: "alpha-001" });
     const clearFileAccess = vi.spyOn(state.fileAccess, "clear");
     const watcher = { close: vi.fn() };
     const worker = {
       cancelProject: vi.fn(() => {
-        expect(state.selectedForWatcher(root)).toBeNull();
+        expect(state.watcherSelection(root)).toBeNull();
       }),
       close: vi.fn(),
     };
@@ -109,7 +252,7 @@ describe("media session lifecycle", () => {
     expect(worker.cancelProject).toHaveBeenCalledOnce();
     expect(worker.close).toHaveBeenCalledOnce();
     expect(clearFileAccess).toHaveBeenCalledOnce();
-    expect(state.selectedForWatcher(root)).toBeNull();
+    expect(state.watcherSelection(root)).toBeNull();
     expect(() => state.requireRoot()).toThrow(/active/i);
   });
 

@@ -10,72 +10,178 @@ import type {
 
 export class StaleMediaSessionError extends Error {
   constructor() {
-    super("Stale media session result");
+    super("Stale media session operation");
     this.name = "StaleMediaSessionError";
   }
 }
 
+export interface MediaSessionEpoch {
+  readonly epoch: number;
+}
+
+export interface ActiveMediaSession extends MediaSessionEpoch {
+  readonly rootPath: string;
+}
+
+export interface WatcherSelection {
+  operation: ActiveMediaSession;
+  project: ProjectReference;
+  options: ProjectScanQuery;
+}
+
 export class MediaSessionState {
   readonly fileAccess = new MediaProtocolAccess();
+  #epoch = 0;
+  #lastAllocatedEpoch = 0;
+  #pendingOpenEpoch: number | null = null;
   #activeRoot: string | null = null;
   #selectedProject: ProjectReference | null = null;
   #scanOptions: ProjectScanQuery | null = null;
   #catalogGeneration = 0;
+  #catalogEpoch = 0;
+  #catalogRoot: string | null = null;
   #projectGeneration = 0;
+  #projectEpoch = 0;
+
+  beginOpen(): MediaSessionEpoch {
+    const operation = this.#advanceEpoch();
+    this.#pendingOpenEpoch = operation.epoch;
+    this.#clearProject();
+    return operation;
+  }
+
+  assertOpen(operation: MediaSessionEpoch): void {
+    if (
+      operation.epoch !== this.#epoch
+      || operation.epoch !== this.#pendingOpenEpoch
+    ) {
+      throw new StaleMediaSessionError();
+    }
+  }
+
+  completeOpen(
+    operation: MediaSessionEpoch,
+    rootPath: string,
+  ): ActiveMediaSession {
+    this.assertOpen(operation);
+    this.#activeRoot = rootPath;
+    this.#pendingOpenEpoch = null;
+    return { ...operation, rootPath };
+  }
+
+  abortOpen(operation: MediaSessionEpoch): void {
+    if (
+      operation.epoch === this.#epoch
+      && operation.epoch === this.#pendingOpenEpoch
+    ) {
+      this.#advanceEpoch();
+      this.#pendingOpenEpoch = null;
+    }
+  }
+
+  activateRoot(rootPath: string): ActiveMediaSession {
+    return this.completeOpen(this.beginOpen(), rootPath);
+  }
+
+  beginProjectSelection(): ActiveMediaSession {
+    const operation = this.#allocateEpoch();
+    if (this.#pendingOpenEpoch !== null) throw new StaleMediaSessionError();
+    this.#epoch = operation.epoch;
+    this.#clearProject();
+    if (!this.#activeRoot) throw new Error("No active .ralphy library");
+    return { ...operation, rootPath: this.#activeRoot };
+  }
+
+  cancelProject(): void {
+    const operation = this.#allocateEpoch();
+    if (this.#pendingOpenEpoch !== null) return;
+    this.#epoch = operation.epoch;
+    this.#clearProject();
+  }
+
+  captureActive(expectedRoot?: string): ActiveMediaSession {
+    if (this.#pendingOpenEpoch !== null || !this.#activeRoot) {
+      throw new Error("No active .ralphy library");
+    }
+    if (expectedRoot && expectedRoot !== this.#activeRoot) {
+      throw new StaleMediaSessionError();
+    }
+    return { epoch: this.#epoch, rootPath: this.#activeRoot };
+  }
+
+  assertActive(operation: ActiveMediaSession): void {
+    if (
+      operation.epoch !== this.#epoch
+      || this.#pendingOpenEpoch !== null
+      || operation.rootPath !== this.#activeRoot
+    ) {
+      throw new StaleMediaSessionError();
+    }
+  }
 
   requireRoot(): string {
-    if (!this.#activeRoot) throw new Error("No active .ralphy library");
-    return this.#activeRoot;
+    return this.captureActive().rootPath;
   }
 
   isActiveRoot(rootPath: string): boolean {
-    return rootPath === this.#activeRoot;
+    return this.#pendingOpenEpoch === null && rootPath === this.#activeRoot;
   }
 
-  activateRoot(rootPath: string): void {
+  beginCatalog(
+    operation: MediaSessionEpoch | ActiveMediaSession,
+    rootPath: string,
+  ): number {
+    this.#assertCatalogOperation(operation, rootPath);
     this.#catalogGeneration += 1;
-    this.#activeRoot = rootPath;
-    this.deselectProject();
-  }
-
-  beginCatalog(rootPath = this.requireRoot()): number {
-    if (rootPath !== this.#activeRoot) throw new StaleMediaSessionError();
-    this.#catalogGeneration += 1;
+    this.#catalogEpoch = operation.epoch;
+    this.#catalogRoot = rootPath;
     return this.#catalogGeneration;
   }
 
-  acceptCatalog(rootPath: string, generation: number): void {
-    if (rootPath !== this.#activeRoot || generation !== this.#catalogGeneration) {
+  acceptCatalog(
+    operation: MediaSessionEpoch | ActiveMediaSession,
+    rootPath: string,
+    generation: number,
+  ): void {
+    this.#assertCatalogOperation(operation, rootPath);
+    if (
+      generation !== this.#catalogGeneration
+      || operation.epoch !== this.#catalogEpoch
+      || rootPath !== this.#catalogRoot
+    ) {
       throw new StaleMediaSessionError();
     }
   }
 
   isCurrentCatalogProgress(progress: CatalogProgress): boolean {
-    return progress.generation === this.#catalogGeneration;
+    return progress.generation === this.#catalogGeneration
+      && this.#catalogEpoch === this.#epoch;
   }
 
   beginProject(
+    operation: ActiveMediaSession,
     project: ProjectReference,
     options: ProjectScanQuery = {},
   ): ProjectScanRequest {
-    if (
-      this.#selectedProject?.workspaceId !== project.workspaceId
-      || this.#selectedProject.projectId !== project.projectId
-    ) {
-      this.fileAccess.clear();
-    }
+    this.assertActive(operation);
     this.#selectedProject = { ...project };
     this.#scanOptions = { includeIntermediate: options.includeIntermediate === true };
     this.#projectGeneration += 1;
+    this.#projectEpoch = operation.epoch;
     return {
-      rootPath: this.requireRoot(),
+      rootPath: operation.rootPath,
       ...project,
       generation: this.#projectGeneration,
       includeIntermediate: options.includeIntermediate === true,
     };
   }
 
-  acceptProject(request: ProjectScanRequest, result: ProjectScanResult): void {
+  acceptProject(
+    operation: ActiveMediaSession,
+    request: ProjectScanRequest,
+    result: ProjectScanResult,
+  ): void {
+    this.assertActive(operation);
     if (
       !this.isCurrentProject(request)
       || result.rootPath !== request.rootPath
@@ -94,6 +200,8 @@ export class MediaSessionState {
     const selected = this.#selectedProject;
     if (
       !selected
+      || this.#pendingOpenEpoch !== null
+      || this.#projectEpoch !== this.#epoch
       || value.generation !== this.#projectGeneration
       || value.workspaceId !== selected.workspaceId
       || value.projectId !== selected.projectId
@@ -103,29 +211,58 @@ export class MediaSessionState {
     return !("rootPath" in value) || value.rootPath === this.#activeRoot;
   }
 
-  selectedForWatcher(rootPath: string): ProjectReference | null {
-    return rootPath === this.#activeRoot && this.#selectedProject
-      ? { ...this.#selectedProject }
-      : null;
-  }
-
-  scanOptionsForWatcher(rootPath: string): ProjectScanQuery | null {
-    return rootPath === this.#activeRoot && this.#selectedProject && this.#scanOptions
-      ? { ...this.#scanOptions }
-      : null;
-  }
-
-  deselectProject(): void {
-    this.#selectedProject = null;
-    this.#scanOptions = null;
-    this.#projectGeneration += 1;
-    this.fileAccess.clear();
+  watcherSelection(rootPath: string): WatcherSelection | null {
+    if (
+      this.#pendingOpenEpoch !== null
+      || rootPath !== this.#activeRoot
+      || !this.#selectedProject
+      || !this.#scanOptions
+    ) {
+      return null;
+    }
+    return {
+      operation: { epoch: this.#epoch, rootPath },
+      project: { ...this.#selectedProject },
+      options: { ...this.#scanOptions },
+    };
   }
 
   close(): void {
+    this.#advanceEpoch();
+    this.#pendingOpenEpoch = null;
     this.#activeRoot = null;
-    this.#catalogGeneration += 1;
-    this.deselectProject();
+    this.#clearProject();
+  }
+
+  #allocateEpoch(): MediaSessionEpoch {
+    this.#lastAllocatedEpoch += 1;
+    return { epoch: this.#lastAllocatedEpoch };
+  }
+
+  #advanceEpoch(): MediaSessionEpoch {
+    const operation = this.#allocateEpoch();
+    this.#epoch = operation.epoch;
+    return operation;
+  }
+
+  #clearProject(): void {
+    this.#selectedProject = null;
+    this.#scanOptions = null;
+    this.#projectGeneration += 1;
+    this.#projectEpoch = 0;
+    this.fileAccess.clear();
+  }
+
+  #assertCatalogOperation(
+    operation: MediaSessionEpoch | ActiveMediaSession,
+    rootPath: string,
+  ): void {
+    if ("rootPath" in operation) {
+      this.assertActive(operation);
+      if (operation.rootPath !== rootPath) throw new StaleMediaSessionError();
+    } else {
+      this.assertOpen(operation);
+    }
   }
 }
 
@@ -134,35 +271,43 @@ interface StartableResource {
   close(): void;
 }
 
+interface ResourceReplacement<Resource extends StartableResource, Result> {
+  assertCurrent(): void;
+  create(): Resource;
+  prepare?(): Promise<void>;
+  commit(): Result;
+}
+
 export class ActiveRootResource<Resource extends StartableResource> {
   #resource: Resource | null = null;
   #tail: Promise<void> = Promise.resolve();
 
-  replace(
-    state: MediaSessionState,
-    rootPath: string,
-    create: () => Resource,
-    commit: () => Promise<void>,
-  ): Promise<void> {
+  replace<Result>(
+    replacement: ResourceReplacement<Resource, Result>,
+  ): Promise<Result> {
     const operation = this.#tail.then(async () => {
-      if (!state.isActiveRoot(rootPath)) throw new StaleMediaSessionError();
-      const candidate = create();
-      let installed = false;
+      replacement.assertCurrent();
+      const candidate = replacement.create();
       try {
         const started = await candidate.start();
-        if (!started || !state.isActiveRoot(rootPath)) throw new StaleMediaSessionError();
+        replacement.assertCurrent();
+        if (!started) throw new StaleMediaSessionError();
+        await replacement.prepare?.();
+        replacement.assertCurrent();
         const previous = this.#resource;
+        const result = replacement.commit();
         this.#resource = candidate;
-        installed = true;
-        previous?.close();
-        await commit();
-        if (!state.isActiveRoot(rootPath)) throw new StaleMediaSessionError();
+        try {
+          previous?.close();
+        } catch {
+          // The new resource and session are already committed.
+        }
+        return result;
       } catch (error) {
-        if (!installed) {
+        try {
           candidate.close();
-        } else if (!state.isActiveRoot(rootPath) && this.#resource === candidate) {
-          this.#resource = null;
-          candidate.close();
+        } catch {
+          // Preserve the startup or commit error.
         }
         throw error;
       }
@@ -175,9 +320,39 @@ export class ActiveRootResource<Resource extends StartableResource> {
   }
 
   close(): void {
-    this.#resource?.close();
+    const resource = this.#resource;
     this.#resource = null;
+    try {
+      resource?.close();
+    } catch {
+      // Session invalidation remains authoritative during teardown.
+    }
   }
+}
+
+export async function guardedResult<Result>(
+  state: MediaSessionState,
+  operation: ActiveMediaSession,
+  run: () => Promise<Result>,
+): Promise<Result> {
+  state.assertActive(operation);
+  const result = await run();
+  state.assertActive(operation);
+  return result;
+}
+
+export async function guardedSideEffect<Prepared, Result>(
+  state: MediaSessionState,
+  operation: ActiveMediaSession,
+  prepare: () => Promise<Prepared>,
+  sideEffect: (prepared: Prepared) => Result | Promise<Result>,
+): Promise<Result> {
+  state.assertActive(operation);
+  const prepared = await prepare();
+  state.assertActive(operation);
+  const result = await sideEffect(prepared);
+  state.assertActive(operation);
+  return result;
 }
 
 interface ClosableWatcher {

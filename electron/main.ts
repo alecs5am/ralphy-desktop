@@ -8,8 +8,7 @@ import {
   protocol,
   shell,
 } from "electron";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { mkdir, readFile, stat } from "node:fs/promises";
 import { Worker } from "node:worker_threads";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -34,8 +33,13 @@ import {
 import { LibraryWatcher } from "./media/watcher";
 import { ScanRequestCancelledError } from "./media/worker";
 import { trashAuthorizedItems } from "./media/protocol-access";
+import { guardedAtomicWrite } from "./media/atomic-write";
 import {
   ActiveRootResource,
+  type ActiveMediaSession,
+  guardedResult,
+  guardedSideEffect,
+  type MediaSessionEpoch,
   MediaSessionState,
   sendIfWindowAlive,
   StaleMediaSessionError,
@@ -187,12 +191,21 @@ function settingsPath(): string {
   return join(app.getPath("userData"), "media-library-settings.json");
 }
 
-async function readSettings(): Promise<AppSettings> {
+async function readSettings(assertCurrent: () => void = () => undefined): Promise<AppSettings> {
+  assertCurrent();
   const path = settingsPath();
   const info = await stat(path).catch(() => null);
+  assertCurrent();
   if (!info?.isFile() || info.size > SETTINGS_LIMIT_BYTES) return { lastLibrary: null };
+  let data: string;
   try {
-    const value = JSON.parse(await readFile(path, "utf8")) as unknown;
+    data = await readFile(path, "utf8");
+  } catch {
+    return { lastLibrary: null };
+  }
+  assertCurrent();
+  try {
+    const value = JSON.parse(data) as unknown;
     if (value !== null && typeof value === "object") {
       const lastLibrary = (value as Record<string, unknown>).lastLibrary;
       return { lastLibrary: typeof lastLibrary === "string" ? lastLibrary : null };
@@ -203,16 +216,19 @@ async function readSettings(): Promise<AppSettings> {
   return { lastLibrary: null };
 }
 
-async function writeSettings(settings: AppSettings): Promise<void> {
+async function writeSettings(
+  settings: AppSettings,
+  assertCurrent: () => void,
+): Promise<void> {
+  assertCurrent();
   const path = settingsPath();
   await mkdir(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
-  await rename(temporary, path);
-}
-
-function requireActiveRoot(): string {
-  return mediaState.requireRoot();
+  assertCurrent();
+  await guardedAtomicWrite(
+    path,
+    `${JSON.stringify(settings, null, 2)}\n`,
+    { maxBytes: SETTINGS_LIMIT_BYTES, assertCurrent },
+  );
 }
 
 function parseString(value: unknown, label: string, maxLength = 4096): string {
@@ -243,28 +259,39 @@ function parseProjectScanQuery(value: unknown): ProjectScanQuery {
   return { includeIntermediate };
 }
 
-async function refreshCatalog(rootPath = requireActiveRoot()): Promise<CatalogResult> {
-  const generation = mediaState.beginCatalog(rootPath);
+async function refreshCatalog(
+  operation: MediaSessionEpoch | ActiveMediaSession,
+  rootPath: string,
+  emitResult = true,
+): Promise<CatalogResult> {
+  const generation = mediaState.beginCatalog(operation, rootPath);
   const result = await mediaWorker().catalog(rootPath, generation);
-  mediaState.acceptCatalog(rootPath, generation);
-  emitMedia({ type: "catalog-result", result });
+  mediaState.acceptCatalog(operation, rootPath, generation);
+  if (emitResult) emitMedia({ type: "catalog-result", result });
   return result;
 }
 
 async function scanSelectedProject(
+  operation: ActiveMediaSession,
   project: ProjectReference,
   options: ProjectScanQuery = {},
 ): Promise<ProjectScanResult> {
-  const rootPath = requireActiveRoot();
+  mediaState.assertActive(operation);
+  const rootPath = operation.rootPath;
   await resolveProjectPath(rootPath, project.workspaceId, project.projectId);
-  const request = mediaState.beginProject(project, options);
+  mediaState.assertActive(operation);
+  const request = mediaState.beginProject(operation, project, options);
   try {
     const result = await mediaWorker().scanProject(request);
-    mediaState.acceptProject(request, result);
+    mediaState.acceptProject(operation, request, result);
     emitMedia({ type: "project-result", result });
+    mediaState.assertActive(operation);
     return result;
   } catch (error) {
-    if (error instanceof ScanRequestCancelledError) {
+    if (
+      error instanceof ScanRequestCancelledError
+      && mediaState.isCurrentProject(request)
+    ) {
       emitMedia({ type: "project-cancelled", request });
     }
     throw error;
@@ -274,9 +301,15 @@ async function scanSelectedProject(
 function createWatcher(rootPath: string): LibraryWatcher {
   return new LibraryWatcher({
     rootPath,
-    selectedProject: () => mediaState.selectedForWatcher(rootPath),
+    selectedProject: () => mediaState.watcherSelection(rootPath)?.project ?? null,
     onCatalogChange() {
-      void refreshCatalog(rootPath).catch((error: unknown) => {
+      let operation: ActiveMediaSession;
+      try {
+        operation = mediaState.captureActive(rootPath);
+      } catch {
+        return;
+      }
+      void refreshCatalog(operation, rootPath).catch((error: unknown) => {
         if (!(error instanceof StaleMediaSessionError)) {
           emitMedia({
             type: "error",
@@ -287,10 +320,13 @@ function createWatcher(rootPath: string): LibraryWatcher {
       });
     },
     onSelectedProjectChange() {
-      const project = mediaState.selectedForWatcher(rootPath);
-      const options = mediaState.scanOptionsForWatcher(rootPath);
-      if (!project || !options) return;
-      void scanSelectedProject(project, options).catch((error: unknown) => {
+      const selection = mediaState.watcherSelection(rootPath);
+      if (!selection) return;
+      void scanSelectedProject(
+        selection.operation,
+        selection.project,
+        selection.options,
+      ).catch((error: unknown) => {
         if (
           !(error instanceof StaleMediaSessionError)
           && !(error instanceof ScanRequestCancelledError)
@@ -311,63 +347,131 @@ function createWatcher(rootPath: string): LibraryWatcher {
   });
 }
 
-async function openLibrary(rootPath: string): Promise<LibraryOpenResult> {
-  const root = await validateLibraryRoot(rootPath);
-  watcher.close();
-  mediaState.activateRoot(root);
-  worker?.cancelProject();
-  const catalog = await refreshCatalog(root);
-  await watcher.replace(
-    mediaState,
-    root,
-    () => createWatcher(root),
-    () => writeSettings({ lastLibrary: root }),
-  );
-  return { rootPath: root, catalog };
+async function openLibrary(
+  operation: MediaSessionEpoch,
+  rootPath: string,
+): Promise<LibraryOpenResult> {
+  try {
+    const root = await validateLibraryRoot(rootPath);
+    mediaState.assertOpen(operation);
+    const catalog = await refreshCatalog(operation, root, false);
+    mediaState.assertOpen(operation);
+    const active = await watcher.replace({
+      assertCurrent: () => mediaState.assertOpen(operation),
+      create: () => createWatcher(root),
+      prepare: () => writeSettings(
+        { lastLibrary: root },
+        () => mediaState.assertOpen(operation),
+      ),
+      commit: () => mediaState.completeOpen(operation, root),
+    });
+    mediaState.assertActive(active);
+    emitMedia({ type: "catalog-result", result: catalog });
+    mediaState.assertActive(active);
+    return { rootPath: root, catalog };
+  } catch (error) {
+    mediaState.abortOpen(operation);
+    throw error;
+  }
 }
 
-async function mediaUrl(path: string): Promise<string> {
-  const root = requireActiveRoot();
-  const token = await mediaState.fileAccess.mint(root, path);
+function beginOpenOperation(): MediaSessionEpoch {
+  const operation = mediaState.beginOpen();
+  worker?.cancelProject();
+  return operation;
+}
+
+async function mediaUrl(
+  operation: ActiveMediaSession,
+  path: string,
+): Promise<string> {
+  const assertCurrent = (): void => mediaState.assertActive(operation);
+  const token = await mediaState.fileAccess.mint(operation.rootPath, path, assertCurrent);
+  assertCurrent();
   return `ralphy-media://asset/${token}`;
 }
 
 function registerMediaIpc(): void {
   ipcMain.handle(MEDIA_CHANNELS.chooseLibrary, async () => {
+    const operation = beginOpenOperation();
     const options: Electron.OpenDialogOptions = {
       title: "Choose Ralphy Library",
       message: "Choose a .ralphy directory",
       properties: ["openDirectory"],
     };
-    const result = win
-      ? await dialog.showOpenDialog(win, options)
-      : await dialog.showOpenDialog(options);
-    return result.canceled || !result.filePaths[0] ? null : openLibrary(result.filePaths[0]);
+    try {
+      const result = win
+        ? await dialog.showOpenDialog(win, options)
+        : await dialog.showOpenDialog(options);
+      mediaState.assertOpen(operation);
+      if (result.canceled || !result.filePaths[0]) {
+        mediaState.abortOpen(operation);
+        return null;
+      }
+      return await openLibrary(operation, result.filePaths[0]);
+    } catch (error) {
+      mediaState.abortOpen(operation);
+      throw error;
+    }
   });
   ipcMain.handle(MEDIA_CHANNELS.restoreLibrary, async () => {
-    const { lastLibrary } = await readSettings();
-    if (!lastLibrary) return null;
+    const operation = beginOpenOperation();
     try {
-      return await openLibrary(lastLibrary);
+      const assertCurrent = (): void => mediaState.assertOpen(operation);
+      const { lastLibrary } = await readSettings(assertCurrent);
+      assertCurrent();
+      if (!lastLibrary) {
+        mediaState.abortOpen(operation);
+        return null;
+      }
+      return await openLibrary(operation, lastLibrary);
     } catch {
+      mediaState.abortOpen(operation);
       return null;
     }
   });
-  ipcMain.handle(MEDIA_CHANNELS.openLibrary, (_event, rootPath: unknown) => (
-    openLibrary(parseString(rootPath, "library path"))
-  ));
-  ipcMain.handle(MEDIA_CHANNELS.scanProject, (_event, project: unknown, options: unknown) => (
-    scanSelectedProject(parseProjectReference(project), parseProjectScanQuery(options))
-  ));
+  ipcMain.handle(MEDIA_CHANNELS.openLibrary, (_event, rootPath: unknown) => {
+    const operation = beginOpenOperation();
+    try {
+      return openLibrary(operation, parseString(rootPath, "library path"));
+    } catch (error) {
+      mediaState.abortOpen(operation);
+      throw error;
+    }
+  });
+  ipcMain.handle(MEDIA_CHANNELS.scanProject, (_event, project: unknown, options: unknown) => {
+    const operation = mediaState.beginProjectSelection();
+    worker?.cancelProject();
+    return scanSelectedProject(
+      operation,
+      parseProjectReference(project),
+      parseProjectScanQuery(options),
+    );
+  });
   ipcMain.handle(MEDIA_CHANNELS.cancelProjectScan, () => {
-    mediaState.deselectProject();
+    mediaState.cancelProject();
     worker?.cancelProject();
   });
-  ipcMain.handle(MEDIA_CHANNELS.loadAnnotations, () => loadAnnotations(requireActiveRoot()));
-  ipcMain.handle(MEDIA_CHANNELS.updateAnnotations, (_event, updates: unknown) => (
-    updateAnnotations(requireActiveRoot(), updates)
-  ));
+  ipcMain.handle(MEDIA_CHANNELS.loadAnnotations, () => {
+    const operation = mediaState.captureActive();
+    const assertCurrent = (): void => mediaState.assertActive(operation);
+    return guardedResult(
+      mediaState,
+      operation,
+      () => loadAnnotations(operation.rootPath, { assertCurrent }),
+    );
+  });
+  ipcMain.handle(MEDIA_CHANNELS.updateAnnotations, (_event, updates: unknown) => {
+    const operation = mediaState.captureActive();
+    const assertCurrent = (): void => mediaState.assertActive(operation);
+    return guardedResult(
+      mediaState,
+      operation,
+      () => updateAnnotations(operation.rootPath, updates, { assertCurrent }),
+    );
+  });
   ipcMain.handle(MEDIA_CHANNELS.trashItems, (_event, rawPaths: unknown) => {
+    const operation = mediaState.captureActive();
     if (
       !Array.isArray(rawPaths)
       || rawPaths.length > MAX_TRASH_ITEMS
@@ -376,29 +480,33 @@ function registerMediaIpc(): void {
       throw new Error("Invalid Trash paths");
     }
     const paths = rawPaths.map((path) => parseString(path, "Trash path"));
-    const root = requireActiveRoot();
     return trashAuthorizedItems(
-      root,
+      operation.rootPath,
       paths,
       mediaState.fileAccess,
       (path) => shell.trashItem(path),
+      () => mediaState.assertActive(operation),
     );
   });
-  ipcMain.handle(MEDIA_CHANNELS.showInFinder, async (_event, rawPath: unknown) => {
-    const root = requireActiveRoot();
-    const path = await mediaState.fileAccess.resolveFile(
-      root,
-      parseString(rawPath, "Finder path"),
+  ipcMain.handle(MEDIA_CHANNELS.showInFinder, (_event, rawPath: unknown) => {
+    const operation = mediaState.captureActive();
+    const path = parseString(rawPath, "Finder path");
+    return guardedSideEffect(
+      mediaState,
+      operation,
+      () => mediaState.fileAccess.resolveFile(operation.rootPath, path),
+      (resolvedPath) => shell.showItemInFolder(resolvedPath),
     );
-    shell.showItemInFolder(path);
   });
-  ipcMain.handle(MEDIA_CHANNELS.openExternal, async (_event, rawPath: unknown) => {
-    const root = requireActiveRoot();
-    const path = await mediaState.fileAccess.resolveFile(
-      root,
-      parseString(rawPath, "external path"),
+  ipcMain.handle(MEDIA_CHANNELS.openExternal, (_event, rawPath: unknown) => {
+    const operation = mediaState.captureActive();
+    const path = parseString(rawPath, "external path");
+    return guardedSideEffect(
+      mediaState,
+      operation,
+      () => mediaState.fileAccess.resolveFile(operation.rootPath, path),
+      (resolvedPath) => shell.openPath(resolvedPath),
     );
-    return shell.openPath(path);
   });
   ipcMain.handle(MEDIA_CHANNELS.copyText, (_event, rawText: unknown) => {
     const text = parseString(rawText, "clipboard text", CLIPBOARD_LIMIT);
@@ -407,20 +515,26 @@ function registerMediaIpc(): void {
   ipcMain.handle(
     MEDIA_CHANNELS.readText,
     (_event, rawPath: unknown, rawMaxBytes?: unknown) => {
+      const operation = mediaState.captureActive();
       const maxBytes = typeof rawMaxBytes === "number" && Number.isFinite(rawMaxBytes)
         ? rawMaxBytes
         : undefined;
-      const root = requireActiveRoot();
-      return mediaState.fileAccess.resolveFile(
-        root,
-        parseString(rawPath, "text path"),
-        ["text"],
-      ).then((path) => readBoundedText(root, path, maxBytes));
+      const path = parseString(rawPath, "text path");
+      return guardedResult(mediaState, operation, async () => {
+        const resolvedPath = await mediaState.fileAccess.resolveFile(
+          operation.rootPath,
+          path,
+          ["text"],
+        );
+        mediaState.assertActive(operation);
+        return readBoundedText(operation.rootPath, resolvedPath, maxBytes);
+      });
     },
   );
-  ipcMain.handle(MEDIA_CHANNELS.getMediaUrl, (_event, rawPath: unknown) => (
-    mediaUrl(parseString(rawPath, "media path"))
-  ));
+  ipcMain.handle(MEDIA_CHANNELS.getMediaUrl, (_event, rawPath: unknown) => {
+    const operation = mediaState.captureActive();
+    return mediaUrl(operation, parseString(rawPath, "media path"));
+  });
 }
 
 function registerLegacyAgentIpc(): void {
@@ -463,7 +577,10 @@ function createWindow(): void {
   });
   win = createdWindow;
   createdWindow.on("closed", () => {
-    if (win === createdWindow) win = null;
+    if (win === createdWindow) {
+      win = null;
+      stopBackgroundResources();
+    }
   });
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) void createdWindow.loadURL(devUrl);
@@ -482,13 +599,21 @@ registerLegacyAgentIpc();
 
 void app.whenReady().then(() => {
   protocol.handle("ralphy-media", async (request) => {
-    const url = new URL(request.url);
-    if (url.hostname !== "asset") return new Response("Not found", { status: 404 });
-    const token = url.pathname.slice(1);
     try {
-      const root = requireActiveRoot();
-      const safePath = await mediaState.fileAccess.resolve(root, token);
-      return net.fetch(pathToFileURL(safePath).toString());
+      const operation = mediaState.captureActive();
+      const assertCurrent = (): void => mediaState.assertActive(operation);
+      const url = new URL(request.url);
+      if (url.hostname !== "asset") return new Response("Not found", { status: 404 });
+      const token = url.pathname.slice(1);
+      const safePath = await mediaState.fileAccess.resolve(
+        operation.rootPath,
+        token,
+        assertCurrent,
+      );
+      assertCurrent();
+      const response = await net.fetch(pathToFileURL(safePath).toString());
+      assertCurrent();
+      return response;
     } catch {
       return new Response("Forbidden", { status: 403 });
     }

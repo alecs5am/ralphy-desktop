@@ -1,4 +1,11 @@
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
@@ -7,13 +14,17 @@ import {
   updateAnnotations,
   validateAnnotationUpdates,
 } from "../electron/media/annotations";
+import { MediaSessionState } from "../electron/media/session";
 import { makeLibraryFixture, type LibraryFixture } from "./fixtures";
 
 let fixture: LibraryFixture | undefined;
+let secondFixture: LibraryFixture | undefined;
 
 afterEach(async () => {
   if (fixture) await rm(fixture.parentPath, { recursive: true, force: true });
+  if (secondFixture) await rm(secondFixture.parentPath, { recursive: true, force: true });
   fixture = undefined;
+  secondFixture = undefined;
 });
 
 describe("media annotations", () => {
@@ -137,6 +148,99 @@ describe("media annotations", () => {
     });
 
     expect(Object.keys((await loadAnnotations(fixture.rootPath)).items)).toEqual(["first", "second"]);
+  });
+
+  test("rejects delayed loads and updates after switching libraries", async () => {
+    fixture = await makeLibraryFixture();
+    secondFixture = await makeLibraryFixture();
+    await updateAnnotations(fixture.rootPath, {
+      first: { reviewStatus: "Approved", favorite: false, rating: 4, tags: [], notes: "root-a" },
+    });
+    const before = await readFile(
+      join(fixture.rootPath, "media-library", "library.json"),
+      "utf8",
+    );
+    const state = new MediaSessionState();
+    state.activateRoot(fixture.rootPath);
+    const loadOperation = state.captureActive();
+    const loading = loadAnnotations(fixture.rootPath, {
+      assertCurrent: () => state.assertActive(loadOperation),
+    });
+    state.activateRoot(secondFixture.rootPath);
+
+    await expect(loading).rejects.toThrow(/stale media session/i);
+
+    state.activateRoot(fixture.rootPath);
+    const updateOperation = state.captureActive();
+    const updating = updateAnnotations(fixture.rootPath, {
+      second: { reviewStatus: "Reject", favorite: false, rating: 0, tags: [], notes: "stale" },
+    }, {
+      assertCurrent: () => state.assertActive(updateOperation),
+    });
+    state.activateRoot(secondFixture.rootPath);
+
+    await expect(updating).rejects.toThrow(/stale media session/i);
+    expect(await readFile(join(fixture.rootPath, "media-library", "library.json"), "utf8"))
+      .toBe(before);
+  });
+
+  test("rejects a delayed save before replacing the annotation store", async () => {
+    fixture = await makeLibraryFixture();
+    secondFixture = await makeLibraryFixture();
+    const state = new MediaSessionState();
+    state.activateRoot(fixture.rootPath);
+    const operation = state.captureActive();
+    const saving = saveAnnotations(fixture.rootPath, {
+      version: 1,
+      items: {},
+    }, {
+      assertCurrent: () => state.assertActive(operation),
+    });
+    state.activateRoot(secondFixture.rootPath);
+
+    await expect(saving).rejects.toThrow(/stale media session/i);
+    await expect(
+      readFile(join(fixture.rootPath, "media-library", "library.json"), "utf8"),
+    ).rejects.toThrow();
+  });
+
+  test("rolls back a store replacement that becomes stale during rename", async () => {
+    fixture = await makeLibraryFixture();
+    secondFixture = await makeLibraryFixture();
+    const baseline = {
+      version: 1,
+      items: {
+        first: {
+          reviewStatus: "Approved" as const,
+          favorite: false,
+          rating: 4,
+          tags: [],
+          notes: "keep",
+          updatedAt: "2026-07-30T00:00:00.000Z",
+        },
+      },
+    };
+    await saveAnnotations(fixture.rootPath, baseline);
+    const state = new MediaSessionState();
+    state.activateRoot(fixture.rootPath);
+    const operation = state.captureActive();
+    let switched = false;
+
+    await expect(saveAnnotations(fixture.rootPath, {
+      version: 1,
+      items: {},
+    }, {
+      assertCurrent: () => state.assertActive(operation),
+      renameFile: async (from, to) => {
+        await rename(from, to);
+        if (!switched) {
+          switched = true;
+          state.activateRoot(secondFixture!.rootPath);
+        }
+      },
+    })).rejects.toThrow(/stale media session/i);
+
+    expect(await loadAnnotations(fixture.rootPath)).toEqual(baseline);
   });
 
   test("rejects annotation batches above the IPC update limit", () => {
