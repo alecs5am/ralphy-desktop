@@ -23,8 +23,12 @@ final class RalphyMediaApplicationDelegate: NSObject, NSApplicationDelegate {
         }
 
         terminationReplyPending = true
+        viewModel.beginTermination()
         Task { [weak self] in
             let completed = await viewModel.completePendingTerminationWork()
+            if !completed {
+                viewModel.cancelTermination()
+            }
             self?.terminationReplyPending = false
             sender.reply(toApplicationShouldTerminate: completed)
         }

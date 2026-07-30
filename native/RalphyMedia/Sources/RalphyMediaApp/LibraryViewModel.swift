@@ -154,6 +154,7 @@ final class LibraryViewModel: ObservableObject {
     @Published private(set) var pendingTrashConfirmation: [MediaItem]?
     @Published private(set) var trashProgress: TrashProgress?
     @Published private(set) var isApplyingQuery = false
+    @Published private(set) var isTerminating = false
     @Published private(set) var quickLookURL: URL?
     @Published var errorMessage: String?
 
@@ -230,6 +231,7 @@ final class LibraryViewModel: ObservableObject {
     private var watcher: FolderWatcher?
     private var scanGeneration: UInt64 = 0
     private var queryGeneration: UInt64 = 0
+    private var rootLoadGeneration: UInt64 = 0
     private var annotationSaveGeneration: UInt64 = 0
     private var selectionAnchorID: String?
     private var primarySelectionID: String?
@@ -364,6 +366,15 @@ final class LibraryViewModel: ObservableObject {
         hasPendingAnnotationSaves || isTrashing
     }
 
+    func beginTermination() {
+        isTerminating = true
+        rootLoadGeneration &+= 1
+    }
+
+    func cancelTermination() {
+        isTerminating = false
+    }
+
     func count(for verdict: ReviewVerdict) -> Int {
         sourceCounts.count(for: verdict)
     }
@@ -382,6 +393,12 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func pickLibrary() {
+        guard !isTerminating else {
+            if isTrashing {
+                errorMessage = "Wait for the Trash operation to finish before changing libraries."
+            }
+            return
+        }
         guard !isTrashing else {
             errorMessage = "Wait for the Trash operation to finish before changing libraries."
             return
@@ -399,6 +416,12 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func load(root: URL) {
+        guard !isTerminating else {
+            if isTrashing {
+                errorMessage = "Wait for the Trash operation to finish before changing libraries."
+            }
+            return
+        }
         guard !isTrashing else {
             errorMessage = "Wait for the Trash operation to finish before changing libraries."
             return
@@ -413,25 +436,30 @@ final class LibraryViewModel: ObservableObject {
             return
         }
 
+        rootLoadGeneration &+= 1
+        let generation = rootLoadGeneration
         if pendingAnnotationSaves[root] != nil {
             Task { [weak self] in
                 guard let self else { return }
                 switch await self.flushPendingAnnotationSave(for: root) {
                 case .saved:
-                    self.openValidatedRoot(root)
+                    self.openValidatedRoot(root, generation: generation)
                 case .reloadRequired:
                     self.cancelPendingSave(for: root)
-                    self.openValidatedRoot(root)
+                    self.openValidatedRoot(root, generation: generation)
                 case .retryableFailure:
                     break
                 }
             }
             return
         }
-        openValidatedRoot(root)
+        openValidatedRoot(root, generation: generation)
     }
 
-    private func openValidatedRoot(_ root: URL) {
+    private func openValidatedRoot(_ root: URL, generation: UInt64) {
+        guard generation == rootLoadGeneration,
+              !isTrashing,
+              !isTerminating else { return }
         let context: LibraryContext
         do {
             let metadata = try MetadataStore(root: root)
@@ -590,16 +618,18 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func requestTrash() {
-        guard !isApplyingQuery, !isTrashing else { return }
+        guard !isTerminating, !isApplyingQuery, !isTrashing else { return }
         let selected = selectedItems
         guard !selected.isEmpty else { return }
         pendingTrashConfirmation = selected
     }
 
     func confirmTrash() {
-        guard !isTrashing,
+        guard !isTerminating,
+              !isTrashing,
               let pending = pendingTrashConfirmation,
               !pending.isEmpty else { return }
+        rootLoadGeneration &+= 1
         pendingTrashConfirmation = nil
         trashProgress = TrashProgress(completed: 0, total: pending.count)
         let trashItem = self.trashItem
@@ -675,7 +705,7 @@ final class LibraryViewModel: ObservableObject {
         for targets: [MediaItem],
         _ edit: (inout MediaAnnotation) -> Void
     ) {
-        guard !targets.isEmpty else { return }
+        guard !isTerminating, !targets.isEmpty else { return }
         let updatedAt = Date()
         var updatedAnnotations = annotations
         var verdictChanged = false
@@ -753,11 +783,17 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func completePendingTerminationWork() async -> Bool {
-        let annotationsSaved = await flushPendingAnnotationSaves()
-        if let trashTask {
-            await trashTask.value
+        while true {
+            if let trashTask {
+                await trashTask.value
+                continue
+            }
+            if hasPendingAnnotationSaves {
+                guard await flushPendingAnnotationSaves() else { return false }
+                continue
+            }
+            return true
         }
-        return annotationsSaved
     }
 
     private func flushPendingAnnotationSave(

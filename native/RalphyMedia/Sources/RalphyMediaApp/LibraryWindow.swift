@@ -53,6 +53,7 @@ struct LibraryWindow: View {
         .onAppear {
             viewModel.restoreLastLibrary()
         }
+        .disabled(viewModel.isTerminating)
     }
 
     private var quickLookSelection: Binding<URL?> {

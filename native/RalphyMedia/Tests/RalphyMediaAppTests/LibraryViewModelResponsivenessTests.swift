@@ -295,6 +295,12 @@ func terminationWaitsForTrashAndLibraryChangeIsBlocked() async throws {
     delegate.attach(viewModel: viewModel)
     let application = NSApplication.shared
     #expect(delegate.applicationShouldTerminate(application) == .terminateLater)
+    #expect(viewModel.isTerminating)
+
+    let selected = try #require(viewModel.visibleItems.first)
+    viewModel.setVerdict(.keep)
+    #expect(viewModel.annotation(for: selected).verdict == .unreviewed)
+    #expect(!viewModel.hasPendingAnnotationSaves)
 
     viewModel.load(root: other.rootURL)
     try await Task.sleep(for: .milliseconds(700))
@@ -306,6 +312,61 @@ func terminationWaitsForTrashAndLibraryChangeIsBlocked() async throws {
     #expect(viewModel.items.isEmpty)
 }
 
+@Test @MainActor
+func pendingRootLoadCannotCompleteAfterTrashStarts() async throws {
+    let rootB = try ResponsiveLibraryFixture(filenames: ["pending.png"])
+    defer { rootB.remove() }
+    let rootA = try ResponsiveLibraryFixture(filenames: ["remove.png"])
+    defer { rootA.remove() }
+    let saves = BlockingAnnotationSaveOperation()
+    let trash = BlockingTrashOperation()
+    defer {
+        Task { await saves.releaseAll() }
+        trash.releaseRemove()
+    }
+    let viewModel = LibraryViewModel(
+        settings: rootB.settings,
+        trashItem: trash.trash,
+        annotationSave: { store in
+            try await saves.save(store)
+        }
+    )
+
+    viewModel.load(root: rootB.rootURL)
+    try await waitUntil {
+        !viewModel.isScanning
+            && !viewModel.isApplyingQuery
+            && viewModel.visibleItems.count == 1
+    }
+    let pendingItem = try #require(viewModel.visibleItems.first)
+    viewModel.select(pendingItem)
+    viewModel.setVerdict(.keep)
+
+    viewModel.load(root: rootA.rootURL)
+    try await waitUntil {
+        viewModel.rootURL?.path == rootA.rootURL.standardizedFileURL.path
+            && !viewModel.isScanning
+            && !viewModel.isApplyingQuery
+            && viewModel.visibleItems.count == 1
+    }
+
+    viewModel.load(root: rootB.rootURL)
+    try await waitUntilAsync { await saves.startedCount >= 2 }
+
+    viewModel.selectAllVisible()
+    viewModel.requestTrash()
+    viewModel.confirmTrash()
+    try await waitUntil { trash.removeStarted }
+
+    await saves.releaseAll()
+    try await Task.sleep(for: .milliseconds(900))
+    #expect(viewModel.rootURL?.path == rootA.rootURL.standardizedFileURL.path)
+    #expect(viewModel.isTrashing)
+
+    trash.releaseRemove()
+    try await waitUntil { !viewModel.isTrashing }
+}
+
 @MainActor
 private func waitUntil(
     timeout: Duration = .seconds(8),
@@ -314,6 +375,20 @@ private func waitUntil(
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)
     while !condition() {
+        guard clock.now < deadline else {
+            throw ResponsiveLibraryTestError.timedOut
+        }
+        try await Task.sleep(for: .milliseconds(20))
+    }
+}
+
+private func waitUntilAsync(
+    timeout: Duration = .seconds(8),
+    condition: @escaping @Sendable () async -> Bool
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while !(await condition()) {
         guard clock.now < deadline else {
             throw ResponsiveLibraryTestError.timedOut
         }
@@ -426,6 +501,26 @@ private final class BlockingTrashOperation: @unchecked Sendable {
             release = true
             condition.broadcast()
         }
+    }
+}
+
+private actor BlockingAnnotationSaveOperation {
+    private(set) var startedCount = 0
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func save(_ store: MetadataStore) async throws -> MetadataStore {
+        startedCount += 1
+        if !released {
+            await withCheckedContinuation { waiters.append($0) }
+        }
+        return store
+    }
+
+    func releaseAll() {
+        released = true
+        waiters.forEach { $0.resume() }
+        waiters.removeAll()
     }
 }
 
