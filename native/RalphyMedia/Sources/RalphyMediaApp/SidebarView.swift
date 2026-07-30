@@ -2,14 +2,6 @@ import RalphyMediaCore
 import SwiftUI
 
 struct SidebarView: View {
-    private enum Source: Hashable {
-        case all
-        case verdict(ReviewVerdict)
-        case favorites
-        case workspace(String)
-        case project(String)
-    }
-
     @ObservedObject var viewModel: LibraryViewModel
 
     var body: some View {
@@ -20,44 +12,50 @@ struct SidebarView: View {
                     symbol: "square.grid.2x2",
                     count: viewModel.items.count
                 )
-                .tag(Source.all)
+                .tag(LibrarySmartSource.all)
+                sourceRow(
+                    "Usable",
+                    symbol: "checkmark.seal",
+                    count: viewModel.items.count - viewModel.count(for: .reject)
+                )
+                .tag(LibrarySmartSource.usable)
                 sourceRow(
                     "Unreviewed",
                     symbol: "circle",
                     count: viewModel.count(for: .unreviewed)
                 )
-                .tag(Source.verdict(.unreviewed))
+                .tag(LibrarySmartSource.verdict(.unreviewed))
                 sourceRow(
                     "Keep",
                     symbol: "checkmark.circle",
                     count: viewModel.count(for: .keep)
                 )
-                .tag(Source.verdict(.keep))
+                .tag(LibrarySmartSource.verdict(.keep))
                 sourceRow(
                     "Maybe",
                     symbol: "questionmark.circle",
                     count: viewModel.count(for: .maybe)
                 )
-                .tag(Source.verdict(.maybe))
+                .tag(LibrarySmartSource.verdict(.maybe))
                 sourceRow(
                     "Reject",
                     symbol: "xmark.circle",
                     count: viewModel.count(for: .reject)
                 )
-                .tag(Source.verdict(.reject))
+                .tag(LibrarySmartSource.verdict(.reject))
                 sourceRow(
                     "Favorites",
                     symbol: "star",
                     count: viewModel.favoriteCount
                 )
-                .tag(Source.favorites)
+                .tag(LibrarySmartSource.favorites)
             }
 
             if !viewModel.workspaces.isEmpty {
                 Section("Workspaces") {
                     ForEach(viewModel.workspaces, id: \.0) { workspace, count in
                         sourceRow(workspace, symbol: "externaldrive", count: count)
-                            .tag(Source.workspace(workspace))
+                            .tag(LibrarySmartSource.workspace(workspace))
                     }
                 }
             }
@@ -66,7 +64,7 @@ struct SidebarView: View {
                 Section("Projects") {
                     ForEach(viewModel.projects, id: \.0) { project, count in
                         sourceRow(project, symbol: "folder", count: count)
-                            .tag(Source.project(project))
+                            .tag(LibrarySmartSource.project(project))
                     }
                 }
             }
@@ -90,26 +88,12 @@ struct SidebarView: View {
         .navigationTitle("Ralphy Media")
     }
 
-    private var selection: Binding<Source?> {
+    private var selection: Binding<LibrarySmartSource?> {
         Binding(
-            get: {
-                if let project = viewModel.selectedProject {
-                    return .project(project)
-                }
-                if let workspace = viewModel.selectedWorkspace {
-                    return .workspace(workspace)
-                }
-                if viewModel.favoriteOnly {
-                    return .favorites
-                }
-                if let verdict = viewModel.selectedVerdict {
-                    return .verdict(verdict)
-                }
-                return .all
-            },
+            get: { viewModel.selectedSource },
             set: { source in
                 guard let source else { return }
-                apply(source)
+                viewModel.applySource(source)
             }
         )
     }
@@ -136,37 +120,4 @@ struct SidebarView: View {
         .accessibilityLabel("\(title), \(count) files")
     }
 
-    private func apply(_ source: Source) {
-        switch source {
-        case .all:
-            viewModel.selectedWorkspace = nil
-            viewModel.selectedProject = nil
-            viewModel.selectedVerdict = nil
-            viewModel.favoriteOnly = false
-            viewModel.showRejected = true
-        case let .verdict(verdict):
-            viewModel.selectedWorkspace = nil
-            viewModel.selectedProject = nil
-            viewModel.selectedVerdict = verdict
-            viewModel.favoriteOnly = false
-            viewModel.showRejected = true
-        case .favorites:
-            viewModel.selectedWorkspace = nil
-            viewModel.selectedProject = nil
-            viewModel.selectedVerdict = nil
-            viewModel.favoriteOnly = true
-            viewModel.showRejected = true
-        case let .workspace(workspace):
-            viewModel.selectedWorkspace = workspace
-            viewModel.selectedProject = nil
-            viewModel.selectedVerdict = nil
-            viewModel.favoriteOnly = false
-            viewModel.showRejected = true
-        case let .project(project):
-            viewModel.selectedProject = project
-            viewModel.selectedVerdict = nil
-            viewModel.favoriteOnly = false
-            viewModel.showRejected = true
-        }
-    }
 }

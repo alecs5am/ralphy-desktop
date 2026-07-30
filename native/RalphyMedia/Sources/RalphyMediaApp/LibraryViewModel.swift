@@ -2,6 +2,119 @@ import AppKit
 import Foundation
 import RalphyMediaCore
 
+enum LibrarySmartSource: Hashable, Sendable {
+    case all
+    case usable
+    case verdict(ReviewVerdict)
+    case favorites
+    case workspace(String)
+    case project(String)
+}
+
+enum LibrarySourceQuery {
+    static func applying(
+        _ source: LibrarySmartSource,
+        to query: MediaQuery
+    ) -> MediaQuery {
+        var updated = query
+        updated.workspace = nil
+        updated.project = nil
+        updated.verdict = nil
+        updated.favoriteOnly = false
+        updated.excludeRejected = false
+
+        switch source {
+        case .all:
+            break
+        case .usable:
+            updated.excludeRejected = true
+        case let .verdict(verdict):
+            updated.verdict = verdict
+        case .favorites:
+            updated.favoriteOnly = true
+        case let .workspace(workspace):
+            updated.workspace = workspace
+        case let .project(project):
+            updated.workspace = query.workspace
+            updated.project = project
+        }
+        return updated
+    }
+
+    static func selection(for query: MediaQuery) -> LibrarySmartSource {
+        if let project = query.project {
+            return .project(project)
+        }
+        if let workspace = query.workspace {
+            return .workspace(workspace)
+        }
+        if query.favoriteOnly {
+            return .favorites
+        }
+        if let verdict = query.verdict {
+            return .verdict(verdict)
+        }
+        if query.excludeRejected {
+            return .usable
+        }
+        return .all
+    }
+}
+
+struct LibrarySourceCounts: Sendable {
+    private let verdictCounts: [ReviewVerdict: Int]
+    private let workspaceCounts: [String: Int]
+    private let allProjectCounts: [String: Int]
+    private let projectCountsByWorkspace: [String: [String: Int]]
+    let favoriteCount: Int
+
+    init(
+        items: [MediaItem] = [],
+        annotations: [String: MediaAnnotation] = [:]
+    ) {
+        var verdictCounts = Dictionary(
+            uniqueKeysWithValues: ReviewVerdict.allCases.map { ($0, 0) }
+        )
+        var workspaceCounts: [String: Int] = [:]
+        var allProjectCounts: [String: Int] = [:]
+        var projectCountsByWorkspace: [String: [String: Int]] = [:]
+        var favoriteCount = 0
+
+        for item in items {
+            let annotation = annotations[item.relativePath]
+            verdictCounts[annotation?.verdict ?? .unreviewed, default: 0] += 1
+            favoriteCount += annotation?.favorite == true ? 1 : 0
+            workspaceCounts[item.workspace, default: 0] += 1
+            allProjectCounts[item.project, default: 0] += 1
+            projectCountsByWorkspace[item.workspace, default: [:]][item.project, default: 0] += 1
+        }
+
+        self.verdictCounts = verdictCounts
+        self.workspaceCounts = workspaceCounts
+        self.allProjectCounts = allProjectCounts
+        self.projectCountsByWorkspace = projectCountsByWorkspace
+        self.favoriteCount = favoriteCount
+    }
+
+    func count(for verdict: ReviewVerdict) -> Int {
+        verdictCounts[verdict, default: 0]
+    }
+
+    var workspaces: [(String, Int)] {
+        sorted(workspaceCounts)
+    }
+
+    func projects(in workspace: String?) -> [(String, Int)] {
+        sorted(workspace.flatMap { projectCountsByWorkspace[$0] } ?? allProjectCounts)
+    }
+
+    private func sorted(_ counts: [String: Int]) -> [(String, Int)] {
+        counts
+            .map { ($0.key, $0.value) }
+            .sorted { $0.0.localizedStandardCompare($1.0) == .orderedAscending }
+    }
+}
+
 @MainActor
 final class LibraryViewModel: ObservableObject {
     @Published private(set) var rootURL: URL?
@@ -10,6 +123,7 @@ final class LibraryViewModel: ObservableObject {
     @Published private(set) var visibleSections: [MediaSection] = []
     @Published private(set) var visibleItems: [MediaItem] = []
     @Published private(set) var selectedIDs: Set<String> = []
+    @Published private(set) var sourceCounts = LibrarySourceCounts()
     @Published private(set) var isScanning = false
     @Published private(set) var scanDuration: TimeInterval?
     @Published private(set) var statusText = "Open a .ralphy folder"
@@ -103,15 +217,18 @@ final class LibraryViewModel: ObservableObject {
         return selectedItems.first
     }
 
+    var primarySelectionIndex: Int? {
+        primarySelectionID.flatMap { selectedID in
+            visibleItems.firstIndex(where: { $0.id == selectedID })
+        }
+    }
+
     var workspaces: [(String, Int)] {
-        counted(items.map(\.workspace))
+        sourceCounts.workspaces
     }
 
     var projects: [(String, Int)] {
-        let source = query.workspace.map { workspace in
-            items.filter { $0.workspace == workspace }
-        } ?? items
-        return counted(source.map(\.project))
+        sourceCounts.projects(in: query.workspace)
     }
 
     var searchText: String {
@@ -150,11 +267,19 @@ final class LibraryViewModel: ObservableObject {
     }
 
     var favoriteCount: Int {
-        items.count(where: { annotation(for: $0).favorite })
+        sourceCounts.favoriteCount
     }
 
     func count(for verdict: ReviewVerdict) -> Int {
-        items.count(where: { annotation(for: $0).verdict == verdict })
+        sourceCounts.count(for: verdict)
+    }
+
+    var selectedSource: LibrarySmartSource {
+        LibrarySourceQuery.selection(for: query)
+    }
+
+    func applySource(_ source: LibrarySmartSource) {
+        query = LibrarySourceQuery.applying(source, to: query)
     }
 
     func restoreLastLibrary() {
@@ -266,21 +391,9 @@ final class LibraryViewModel: ObservableObject {
         selectionAnchorID = nil
     }
 
-    func selectAdjacent(forward: Bool, extending: Bool = false) {
-        guard !visibleItems.isEmpty else { return }
-        let currentIndex = primarySelectionID.flatMap { selectedID in
-            visibleItems.firstIndex(where: { $0.id == selectedID })
-        }
-        let targetIndex: Int
-        if let currentIndex {
-            targetIndex = min(
-                visibleItems.count - 1,
-                max(0, currentIndex + (forward ? 1 : -1))
-            )
-        } else {
-            targetIndex = forward ? 0 : visibleItems.count - 1
-        }
-        select(visibleItems[targetIndex], shift: extending)
+    func selectVisibleItem(at index: Int, extending: Bool = false) {
+        guard visibleItems.indices.contains(index) else { return }
+        select(visibleItems[index], shift: extending)
     }
 
     func annotation(for item: MediaItem) -> MediaAnnotation {
@@ -392,6 +505,7 @@ final class LibraryViewModel: ObservableObject {
             if primarySelectionID.map(trashedIDs.contains) == true {
                 primarySelectionID = firstSelectedID()
             }
+            updateSourceCounts()
             updateVisibleItems()
             requestScan()
         }
@@ -420,16 +534,36 @@ final class LibraryViewModel: ObservableObject {
     ) {
         guard !targets.isEmpty else { return }
         let updatedAt = Date()
+        var updatedAnnotations = annotations
+        var verdictChanged = false
+        var favoriteChanged = false
+        var searchMetadataChanged = false
+
         for item in targets {
             var annotation = annotation(for: item)
+            let previous = annotation
             edit(&annotation)
             annotation.updatedAt = updatedAt
-            annotations[item.relativePath] = annotation
+            updatedAnnotations[item.relativePath] = annotation
+            verdictChanged = verdictChanged || previous.verdict != annotation.verdict
+            favoriteChanged = favoriteChanged || previous.favorite != annotation.favorite
+            searchMetadataChanged = searchMetadataChanged
+                || previous.tags != annotation.tags
+                || previous.note != annotation.note
         }
+        annotations = updatedAnnotations
         if desiredContext?.root == rootURL {
             desiredContext?.annotations = annotations
         }
-        updateVisibleItems()
+        if verdictChanged || favoriteChanged {
+            updateSourceCounts()
+        }
+        let searchActive = !(query.search?.isEmpty ?? true)
+        if verdictChanged && (query.verdict != nil || query.excludeRejected)
+            || favoriteChanged && query.favoriteOnly
+            || searchMetadataChanged && searchActive {
+            updateVisibleItems()
+        }
         saveAnnotations()
     }
 
@@ -497,6 +631,7 @@ final class LibraryViewModel: ObservableObject {
             rootURL = latestContext.root
             items = result.items
             annotations = latestContext.annotations
+            updateSourceCounts()
             store = latestContext.store
             selectedIDs.formIntersection(Set(items.map(\.id)))
             if primarySelectionID.map(selectedIDs.contains) != true {
@@ -550,10 +685,11 @@ final class LibraryViewModel: ObservableObject {
         visibleItems = visibleSections.flatMap(\.items)
     }
 
-    private func counted(_ values: [String]) -> [(String, Int)] {
-        Dictionary(grouping: values, by: { $0 })
-            .map { ($0.key, $0.value.count) }
-            .sorted { $0.0.localizedStandardCompare($1.0) == .orderedAscending }
+    private func updateSourceCounts() {
+        sourceCounts = LibrarySourceCounts(
+            items: items,
+            annotations: annotations
+        )
     }
 
     private func firstSelectedID() -> String? {

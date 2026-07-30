@@ -3,13 +3,17 @@ import SwiftUI
 
 struct InspectorView: View {
     @ObservedObject var viewModel: LibraryViewModel
+    @ObservedObject var thumbnailStore: ThumbnailStore
     @State private var tagText = ""
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if let item = viewModel.primarySelection {
-                    MediaPreview(item: item)
+                    MediaPreview(
+                        item: item,
+                        thumbnailStore: thumbnailStore
+                    )
                         .frame(height: 250)
 
                     VStack(alignment: .leading, spacing: 3) {

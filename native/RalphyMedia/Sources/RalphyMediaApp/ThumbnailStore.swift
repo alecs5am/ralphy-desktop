@@ -70,6 +70,6 @@ final class ThumbnailStore: ObservableObject {
 
     private func cacheKey(for item: MediaItem, pixelSize: CGSize) -> NSString {
         let modified = item.modifiedAt?.timeIntervalSince1970 ?? 0
-        return "\(item.url.standardizedFileURL.path)|\(modified)|\(Int(pixelSize.width))x\(Int(pixelSize.height))" as NSString
+        return "\(item.url.standardizedFileURL.path)|\(modified)|\(item.sizeBytes)|\(Int(pixelSize.width))x\(Int(pixelSize.height))" as NSString
     }
 }

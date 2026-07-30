@@ -20,7 +20,10 @@ struct LibraryWindow: View {
             }
         }
         .inspector(isPresented: $viewModel.inspectorVisible) {
-            InspectorView(viewModel: viewModel)
+            InspectorView(
+                viewModel: viewModel,
+                thumbnailStore: thumbnailStore
+            )
         }
         .toolbar {
             LibraryToolbar(viewModel: viewModel)

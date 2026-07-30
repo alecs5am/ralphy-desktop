@@ -2,127 +2,170 @@ import AppKit
 import RalphyMediaCore
 import SwiftUI
 
+enum GridNavigationDirection: Sendable {
+    case left
+    case right
+    case up
+    case down
+}
+
+enum GridNavigation {
+    static func targetIndex(
+        current: Int?,
+        itemCount: Int,
+        columnCount: Int,
+        direction: GridNavigationDirection
+    ) -> Int? {
+        guard itemCount > 0 else { return nil }
+        guard let current else {
+            return switch direction {
+            case .left, .up: itemCount - 1
+            case .right, .down: 0
+            }
+        }
+        let boundedCurrent = min(itemCount - 1, max(0, current))
+        let columns = max(1, columnCount)
+        let offset = switch direction {
+        case .left: -1
+        case .right: 1
+        case .up: -columns
+        case .down: columns
+        }
+        return min(itemCount - 1, max(0, boundedCurrent + offset))
+    }
+}
+
 struct MediaGridView: View {
     @ObservedObject var viewModel: LibraryViewModel
     @ObservedObject var thumbnailStore: ThumbnailStore
 
     @FocusState private var gridIsFocused: Bool
+    @State private var adaptiveColumnCount = 1
 
     var body: some View {
-        ScrollView {
-            LazyVGrid(
-                columns: [
-                    GridItem(
-                        .adaptive(
-                            minimum: viewModel.gridSize,
-                            maximum: viewModel.gridSize * 1.35
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVGrid(
+                    columns: [
+                        GridItem(
+                            .adaptive(
+                                minimum: viewModel.gridSize,
+                                maximum: viewModel.gridSize * 1.35
+                            ),
+                            spacing: 12
                         ),
-                        spacing: 12
-                    ),
-                ],
-                alignment: .leading,
-                spacing: 16,
-                pinnedViews: [.sectionHeaders]
-            ) {
-                ForEach(viewModel.visibleSections) { section in
-                    Section {
-                        ForEach(section.items) { item in
-                            MediaTile(
-                                item: item,
-                                annotation: viewModel.annotation(for: item),
-                                selected: viewModel.selectedIDs.contains(item.id),
-                                requestedWidth: viewModel.gridSize,
-                                thumbnailStore: thumbnailStore
-                            )
-                            .onTapGesture(count: 2) {
-                                viewModel.select(item)
-                                viewModel.showQuickLook()
-                            }
-                            .onTapGesture {
-                                let modifiers = NSEvent.modifierFlags
-                                viewModel.select(
-                                    item,
-                                    command: modifiers.contains(.command),
-                                    shift: modifiers.contains(.shift)
+                    ],
+                    alignment: .leading,
+                    spacing: 16,
+                    pinnedViews: [.sectionHeaders]
+                ) {
+                    ForEach(viewModel.visibleSections) { section in
+                        Section {
+                            ForEach(section.items) { item in
+                                MediaTile(
+                                    item: item,
+                                    annotation: viewModel.annotation(for: item),
+                                    selected: viewModel.selectedIDs.contains(item.id),
+                                    requestedWidth: viewModel.gridSize,
+                                    thumbnailStore: thumbnailStore
                                 )
-                                gridIsFocused = true
-                            }
-                            .onDrag {
-                                if !viewModel.selectedIDs.contains(item.id) {
+                                .id(item.id)
+                                .onTapGesture(count: 2) {
                                     viewModel.select(item)
+                                    viewModel.showQuickLook()
                                 }
-                                return NSItemProvider(object: item.url as NSURL)
-                            } preview: {
-                                Label(item.filename, systemImage: symbol(for: item.bucket))
-                                    .padding(8)
+                                .onTapGesture {
+                                    let modifiers = NSEvent.modifierFlags
+                                    viewModel.select(
+                                        item,
+                                        command: modifiers.contains(.command),
+                                        shift: modifiers.contains(.shift)
+                                    )
+                                    gridIsFocused = true
+                                }
+                                .onDrag {
+                                    if !viewModel.selectedIDs.contains(item.id) {
+                                        viewModel.select(item)
+                                    }
+                                    return NSItemProvider(object: item.url as NSURL)
+                                } preview: {
+                                    Label(item.filename, systemImage: symbol(for: item.bucket))
+                                        .padding(8)
+                                }
+                                .contextMenu {
+                                    itemMenu(for: item)
+                                }
                             }
-                            .contextMenu {
-                                itemMenu(for: item)
+                        } header: {
+                            if viewModel.query.group != .none {
+                                HStack {
+                                    Text(section.title)
+                                        .font(.headline)
+                                        .lineLimit(1)
+                                    Text(section.items.count, format: .number)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                }
+                                .padding(.vertical, 5)
+                                .background(.bar)
+                                .accessibilityElement(children: .combine)
                             }
-                        }
-                    } header: {
-                        if viewModel.query.group != .none {
-                            HStack {
-                                Text(section.title)
-                                    .font(.headline)
-                                    .lineLimit(1)
-                                Text(section.items.count, format: .number)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Spacer()
-                            }
-                            .padding(.vertical, 5)
-                            .background(.bar)
-                            .accessibilityElement(children: .combine)
                         }
                     }
                 }
+                .padding(14)
             }
-            .padding(14)
-        }
-        .background(Color(nsColor: .underPageBackgroundColor))
-        .focusable()
-        .focused($gridIsFocused)
-        .onMoveCommand { direction in
-            let extending = NSEvent.modifierFlags.contains(.shift)
-            switch direction {
-            case .left, .up:
-                viewModel.selectAdjacent(forward: false, extending: extending)
-            case .right, .down:
-                viewModel.selectAdjacent(forward: true, extending: extending)
-            @unknown default:
-                break
-            }
-        }
-        .onKeyPress(.space) {
-            viewModel.showQuickLook()
-            return .handled
-        }
-        .onDeleteCommand {
-            viewModel.requestTrash()
-        }
-        .onExitCommand {
-            viewModel.clearSelection()
-        }
-        .overlay {
-            if viewModel.isScanning && viewModel.rootURL == nil {
-                ProgressView("Scanning Library")
-                    .controlSize(.small)
-            } else if viewModel.rootURL == nil {
-                ContentUnavailableView {
-                    Label("No Library Selected", systemImage: "folder")
-                } description: {
-                    Text("Choose a .ralphy folder to begin.")
-                } actions: {
-                    Button("Choose Library") {
-                        viewModel.pickLibrary()
-                    }
+            .background {
+                GeometryReader { geometry in
+                    Color.clear
+                        .onAppear {
+                            updateColumnCount(for: geometry.size.width)
+                        }
+                        .onChange(of: geometry.size.width) {
+                            updateColumnCount(for: geometry.size.width)
+                        }
+                        .onChange(of: viewModel.gridSize) {
+                            updateColumnCount(for: geometry.size.width)
+                        }
                 }
-            } else if viewModel.visibleItems.isEmpty {
-                ContentUnavailableView(
-                    "No Matching Files",
-                    systemImage: "line.3.horizontal.decrease.circle"
-                )
+            }
+            .background(Color(nsColor: .underPageBackgroundColor))
+            .focusable()
+            .focused($gridIsFocused)
+            .onMoveCommand { direction in
+                moveSelection(direction, proxy: proxy)
+            }
+            .onKeyPress(.space) {
+                viewModel.showQuickLook()
+                return .handled
+            }
+            .onDeleteCommand {
+                viewModel.requestTrash()
+            }
+            .onExitCommand {
+                viewModel.clearSelection()
+            }
+            .overlay {
+                if viewModel.isScanning && viewModel.rootURL == nil {
+                    ProgressView("Scanning Library")
+                        .controlSize(.small)
+                } else if viewModel.rootURL == nil {
+                    ContentUnavailableView {
+                        Label("No Library Selected", systemImage: "folder")
+                    } description: {
+                        Text("Choose a .ralphy folder to begin.")
+                    } actions: {
+                        Button("Choose Library") {
+                            viewModel.pickLibrary()
+                        }
+                    }
+                } else if viewModel.visibleItems.isEmpty {
+                    ContentUnavailableView(
+                        "No Matching Files",
+                        systemImage: "line.3.horizontal.decrease.circle"
+                    )
+                }
             }
         }
     }
@@ -184,6 +227,49 @@ struct MediaGridView: View {
     private func selectForBatchAction(_ item: MediaItem) {
         if !viewModel.selectedIDs.contains(item.id) {
             viewModel.select(item)
+        }
+    }
+
+    private func updateColumnCount(for width: CGFloat) {
+        let availableWidth = max(0, width - 28)
+        adaptiveColumnCount = max(
+            1,
+            Int((availableWidth + 12) / (viewModel.gridSize + 12))
+        )
+    }
+
+    private func moveSelection(
+        _ direction: MoveCommandDirection,
+        proxy: ScrollViewProxy
+    ) {
+        let gridDirection: GridNavigationDirection
+        switch direction {
+        case .left:
+            gridDirection = .left
+        case .right:
+            gridDirection = .right
+        case .up:
+            gridDirection = .up
+        case .down:
+            gridDirection = .down
+        @unknown default:
+            return
+        }
+
+        guard let target = GridNavigation.targetIndex(
+            current: viewModel.primarySelectionIndex,
+            itemCount: viewModel.visibleItems.count,
+            columnCount: adaptiveColumnCount,
+            direction: gridDirection
+        ) else {
+            return
+        }
+        viewModel.selectVisibleItem(
+            at: target,
+            extending: NSEvent.modifierFlags.contains(.shift)
+        )
+        if let id = viewModel.primarySelection?.id {
+            proxy.scrollTo(id, anchor: .center)
         }
     }
 }
@@ -354,7 +440,7 @@ private struct ThumbnailView: View {
     }
 
     private var requestID: String {
-        "\(item.id)|\(item.modifiedAt?.timeIntervalSince1970 ?? 0)|\(requestedSize.width)|\(displayScale)"
+        "\(item.id)|\(item.modifiedAt?.timeIntervalSince1970 ?? 0)|\(item.sizeBytes)|\(requestedSize.width)|\(displayScale)"
     }
 
     private func load() {

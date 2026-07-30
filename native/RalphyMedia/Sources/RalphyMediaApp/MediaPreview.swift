@@ -4,6 +4,18 @@ import PDFKit
 import RalphyMediaCore
 import SwiftUI
 
+struct PreviewIdentity: Hashable, Sendable {
+    let id: String
+    let modifiedAt: Date?
+    let sizeBytes: Int64
+
+    init(item: MediaItem) {
+        id = item.id
+        modifiedAt = item.modifiedAt
+        sizeBytes = item.sizeBytes
+    }
+}
+
 struct PreviewTextContent: Sendable {
     let text: String
     let isTruncated: Bool
@@ -11,26 +23,57 @@ struct PreviewTextContent: Sendable {
 
 enum PreviewTextReader {
     static func read(url: URL, byteLimit: Int) async throws -> PreviewTextContent {
-        try await Task.detached(priority: .userInitiated) {
-            let handle = try FileHandle(forReadingFrom: url)
-            defer { try? handle.close() }
-
-            let limit = max(0, byteLimit)
-            let data = try handle.read(upToCount: limit + 1) ?? Data()
-            return PreviewTextContent(
-                text: String(decoding: data.prefix(limit), as: UTF8.self),
-                isTruncated: data.count > limit
-            )
-        }.value
+        try await PreviewLoader().loadText(url: url, byteLimit: byteLimit)
     }
 }
 
-private struct LoadedImage: @unchecked Sendable {
-    let value: NSImage
+struct LoadedPDF: @unchecked Sendable {
+    let value: PDFDocument
 }
 
-private struct LoadedPDF: @unchecked Sendable {
-    let value: PDFDocument
+actor PreviewLoader {
+    private static let chunkSize = 64 * 1_024
+
+    func loadText(url: URL, byteLimit: Int) throws -> PreviewTextContent {
+        let limit = max(0, byteLimit)
+        let readLimit = limit == Int.max ? Int.max : limit + 1
+        let data = try readData(url: url, byteLimit: readLimit)
+        return PreviewTextContent(
+            text: String(decoding: data.prefix(limit), as: UTF8.self),
+            isTruncated: data.count > limit
+        )
+    }
+
+    func loadPDF(url: URL) throws -> LoadedPDF {
+        let data = try readData(url: url)
+        try Task.checkCancellation()
+        guard let document = PDFDocument(data: data) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        try Task.checkCancellation()
+        return LoadedPDF(value: document)
+    }
+
+    private func readData(url: URL, byteLimit: Int? = nil) throws -> Data {
+        try Task.checkCancellation()
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        var data = Data()
+        while byteLimit.map({ data.count < $0 }) ?? true {
+            try Task.checkCancellation()
+            let remaining = byteLimit.map { $0 - data.count } ?? Self.chunkSize
+            let readCount = min(Self.chunkSize, remaining)
+            guard readCount > 0,
+                  let chunk = try handle.read(upToCount: readCount),
+                  !chunk.isEmpty else {
+                break
+            }
+            data.append(chunk)
+        }
+        try Task.checkCancellation()
+        return data
+    }
 }
 
 @MainActor
@@ -42,9 +85,14 @@ private final class MediaPreviewModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var errorMessage: String?
 
+    private let loader = PreviewLoader()
     private var generation = UUID()
 
-    func load(_ item: MediaItem) async {
+    func load(
+        _ item: MediaItem,
+        thumbnailStore: ThumbnailStore,
+        displayScale: CGFloat
+    ) async {
         let requestGeneration = UUID()
         generation = requestGeneration
         reset()
@@ -53,29 +101,19 @@ private final class MediaPreviewModel: ObservableObject {
         do {
             switch item.bucket {
             case .image:
-                let loaded = try await Task.detached(priority: .userInitiated) {
-                    let data = try Data(contentsOf: item.url, options: .mappedIfSafe)
-                    guard let source = NSImage(data: data) else {
-                        throw CocoaError(.fileReadCorruptFile)
-                    }
-                    var proposedRect = NSRect(origin: .zero, size: source.size)
-                    guard let decoded = source.cgImage(
-                        forProposedRect: &proposedRect,
-                        context: nil,
-                        hints: nil
-                    ) else {
-                        throw CocoaError(.fileReadCorruptFile)
-                    }
-                    return LoadedImage(value: NSImage(cgImage: decoded, size: source.size))
-                }.value
+                let loaded = await thumbnailStore.thumbnail(
+                    for: item,
+                    size: CGSize(width: 900, height: 675),
+                    scale: displayScale
+                )
                 guard generation == requestGeneration, !Task.isCancelled else { return }
-                image = loaded.value
+                image = loaded
 
             case .video, .audio:
                 player = AVPlayer(url: item.url)
 
             case .text:
-                let loaded = try await PreviewTextReader.read(
+                let loaded = try await loader.loadText(
                     url: item.url,
                     byteLimit: 256 * 1_024
                 )
@@ -83,12 +121,7 @@ private final class MediaPreviewModel: ObservableObject {
                 text = loaded
 
             case .document:
-                let loaded = try await Task.detached(priority: .userInitiated) {
-                    guard let document = PDFDocument(url: item.url) else {
-                        throw CocoaError(.fileReadCorruptFile)
-                    }
-                    return LoadedPDF(value: document)
-                }.value
+                let loaded = try await loader.loadPDF(url: item.url)
                 guard generation == requestGeneration, !Task.isCancelled else { return }
                 document = loaded.value
 
@@ -125,7 +158,9 @@ private final class MediaPreviewModel: ObservableObject {
 
 struct MediaPreview: View {
     let item: MediaItem
+    @ObservedObject var thumbnailStore: ThumbnailStore
 
+    @Environment(\.displayScale) private var displayScale
     @StateObject private var model = MediaPreviewModel()
 
     var body: some View {
@@ -177,8 +212,12 @@ struct MediaPreview: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 6))
-        .task(id: item.id) {
-            await model.load(item)
+        .task(id: PreviewIdentity(item: item)) {
+            await model.load(
+                item,
+                thumbnailStore: thumbnailStore,
+                displayScale: displayScale
+            )
         }
         .onDisappear {
             model.stop()
