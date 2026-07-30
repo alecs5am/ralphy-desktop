@@ -59,7 +59,10 @@ public actor GenerationLedgerIndex {
         let cached = loadCache(at: cacheURL)
         let base: GenerationLedgerSummary
         let startOffset: UInt64
-        if let cached, cached.matches(sourceURL: sourceURL, source: source) {
+        if let cached,
+           cached.matches(sourceURL: sourceURL, source: source),
+           source.size >= cached.sourceSize,
+           validateContinuity(of: cached, at: sourceURL) {
             if cached.sourceSize == source.size,
                cached.sourceModificationTime == source.modificationTime {
                 return cached.summary
@@ -96,6 +99,13 @@ public actor GenerationLedgerIndex {
                 currentSource.modificationTime == source.modificationTime else {
             return fallback
         }
+        guard let witness = makeContinuityWitness(
+            for: sourceURL,
+            sourceSize: source.size,
+            indexedByteOffset: indexed.indexedByteOffset
+        ) else {
+            return indexed
+        }
 
         let payload = GenerationLedgerCache(
             sourcePath: sourceURL.path,
@@ -103,6 +113,7 @@ public actor GenerationLedgerIndex {
             sourceModificationTime: source.modificationTime,
             sourceDevice: source.device,
             sourceFileNumber: source.fileNumber,
+            witness: witness,
             summary: indexed
         )
         persist(payload, at: cacheURL)
@@ -134,6 +145,7 @@ public actor GenerationLedgerIndex {
         var accumulator = LedgerAccumulator(base)
         var pending = Data()
         var readOffset = startOffset
+        var searchedByteCount = 0
 
         while readOffset < sourceSize {
             guard !Task.isCancelled else { return nil }
@@ -151,7 +163,8 @@ public actor GenerationLedgerIndex {
                 from: &pending,
                 project: project,
                 projectURL: projectURL,
-                accumulator: &accumulator
+                accumulator: &accumulator,
+                searchedByteCount: &searchedByteCount
             )
         }
 
@@ -163,11 +176,14 @@ public actor GenerationLedgerIndex {
         from pending: inout Data,
         project: ProjectReference,
         projectURL: URL,
-        accumulator: inout LedgerAccumulator
+        accumulator: inout LedgerAccumulator,
+        searchedByteCount: inout Int
     ) {
+        precondition(searchedByteCount <= pending.count)
         var consumed = pending.startIndex
-        while consumed < pending.endIndex,
-              let newline = pending[consumed...].firstIndex(of: 0x0A) {
+        var search = pending.index(pending.startIndex, offsetBy: searchedByteCount)
+        while search < pending.endIndex,
+              let newline = pending[search...].firstIndex(of: 0x0A) {
             var line = Data(pending[consumed..<newline])
             if line.last == 0x0D {
                 line.removeLast()
@@ -182,19 +198,182 @@ public actor GenerationLedgerIndex {
                 )
             }
             consumed = newline + 1
+            search = consumed
         }
         if consumed > pending.startIndex {
             pending.removeSubrange(pending.startIndex..<consumed)
         }
+        // All remaining bytes were searched once and contain no newline.
+        searchedByteCount = pending.count
     }
 
     private func loadCache(at url: URL) -> GenerationLedgerCache? {
         guard let data = try? Data(contentsOf: url),
-              let cache = try? JSONDecoder.ralphy.decode(GenerationLedgerCache.self, from: data),
+              let cache = try? JSONDecoder.generationLedger.decode(
+                GenerationLedgerCache.self,
+                from: data
+              ),
               cache.isValid else {
             return nil
         }
         return cache
+    }
+
+    private func makeContinuityWitness(
+        for url: URL,
+        sourceSize: UInt64,
+        indexedByteOffset: UInt64
+    ) -> SourceContinuityWitness? {
+        guard indexedByteOffset <= sourceSize else { return nil }
+        let prefixLength = min(SourceContinuityWitness.maximumBoundedBytes, sourceSize)
+        let boundaryLength = min(
+            SourceContinuityWitness.maximumBoundedBytes,
+            indexedByteOffset
+        )
+        let boundaryStart = indexedByteOffset - boundaryLength
+        guard let prefix = readData(
+            from: url,
+            offset: 0,
+            length: prefixLength
+        ) else {
+            return nil
+        }
+        let boundary: Data
+        if boundaryStart == 0, boundaryLength == prefixLength {
+            boundary = prefix
+        } else {
+            guard let data = readData(
+                from: url,
+                offset: boundaryStart,
+                length: boundaryLength
+            ) else {
+                return nil
+            }
+            boundary = data
+        }
+        guard indexedByteOffset == 0 || boundary.last == 0x0A else { return nil }
+
+        let incompleteTailLength = sourceSize - indexedByteOffset
+        guard let incompleteTailHash = hashRange(
+            in: url,
+            offset: indexedByteOffset,
+            length: incompleteTailLength,
+            rejectingNewlines: true
+        ) else {
+            return nil
+        }
+        return SourceContinuityWitness(
+            prefixLength: prefixLength,
+            prefixHash: stableHash(prefix),
+            boundaryStart: boundaryStart,
+            boundaryLength: boundaryLength,
+            boundaryHash: stableHash(boundary),
+            incompleteTailLength: incompleteTailLength,
+            incompleteTailHash: incompleteTailHash
+        )
+    }
+
+    private func validateContinuity(
+        of cache: GenerationLedgerCache,
+        at url: URL
+    ) -> Bool {
+        guard !Task.isCancelled,
+              let prefix = readData(
+                from: url,
+                offset: 0,
+                length: cache.witness.prefixLength
+              ),
+              stableHash(prefix) == cache.witness.prefixHash else {
+            return false
+        }
+
+        let boundary: Data
+        if cache.witness.boundaryStart == 0,
+           cache.witness.boundaryLength == cache.witness.prefixLength {
+            boundary = prefix
+        } else {
+            guard let data = readData(
+                from: url,
+                offset: cache.witness.boundaryStart,
+                length: cache.witness.boundaryLength
+            ) else {
+                return false
+            }
+            boundary = data
+        }
+        guard cache.indexedByteOffset == 0 || boundary.last == 0x0A,
+              stableHash(boundary) == cache.witness.boundaryHash,
+              let tailHash = hashRange(
+                in: url,
+                offset: cache.indexedByteOffset,
+                length: cache.witness.incompleteTailLength,
+                rejectingNewlines: true
+              ),
+              tailHash == cache.witness.incompleteTailHash else {
+            return false
+        }
+        return true
+    }
+
+    private func readData(
+        from url: URL,
+        offset: UInt64,
+        length: UInt64
+    ) -> Data? {
+        guard length <= UInt64(Int.max) else { return nil }
+        if length == 0 { return Data() }
+        let stream: GenerationLedgerByteStream
+        do {
+            stream = try byteReader.open(url, offset)
+        } catch {
+            return nil
+        }
+        defer { stream.close() }
+
+        var result = Data()
+        result.reserveCapacity(Int(length))
+        while result.count < Int(length) {
+            guard !Task.isCancelled else { return nil }
+            let count = min(chunkSize, Int(length) - result.count)
+            guard let chunk = try? stream.read(upToCount: count),
+                  !chunk.isEmpty else {
+                return nil
+            }
+            result.append(chunk)
+        }
+        return result
+    }
+
+    private func hashRange(
+        in url: URL,
+        offset: UInt64,
+        length: UInt64,
+        rejectingNewlines: Bool
+    ) -> UInt64? {
+        if length == 0 { return StableByteHasher.offsetBasis }
+        let stream: GenerationLedgerByteStream
+        do {
+            stream = try byteReader.open(url, offset)
+        } catch {
+            return nil
+        }
+        defer { stream.close() }
+
+        var remaining = length
+        var hasher = StableByteHasher()
+        while remaining > 0 {
+            guard !Task.isCancelled else { return nil }
+            let count = min(chunkSize, Int(remaining))
+            guard let chunk = try? stream.read(upToCount: count),
+                  !chunk.isEmpty,
+                  UInt64(chunk.count) <= remaining,
+                  !rejectingNewlines || !chunk.contains(0x0A) else {
+                return nil
+            }
+            hasher.update(chunk)
+            remaining -= UInt64(chunk.count)
+        }
+        return hasher.value
     }
 
     private func persist(_ cache: GenerationLedgerCache, at url: URL) {
@@ -276,11 +455,15 @@ final class GenerationLedgerByteStream: @unchecked Sendable {
 }
 
 private struct GenerationLedgerCache: Codable {
+    static let currentSchemaVersion = 2
+
+    let schemaVersion: Int
     let sourcePath: String
     let sourceSize: UInt64
     let sourceModificationTime: TimeInterval
     let sourceDevice: UInt64
     let sourceFileNumber: UInt64
+    let witness: SourceContinuityWitness
     let totalSpendUSD: Double
     let lastActivityAt: Date?
     let attributions: [String: GenerationAttribution]
@@ -293,13 +476,16 @@ private struct GenerationLedgerCache: Codable {
         sourceModificationTime: TimeInterval,
         sourceDevice: UInt64,
         sourceFileNumber: UInt64,
+        witness: SourceContinuityWitness,
         summary: GenerationLedgerSummary
     ) {
+        self.schemaVersion = Self.currentSchemaVersion
         self.sourcePath = sourcePath
         self.sourceSize = sourceSize
         self.sourceModificationTime = sourceModificationTime
         self.sourceDevice = sourceDevice
         self.sourceFileNumber = sourceFileNumber
+        self.witness = witness
         self.totalSpendUSD = summary.totalSpendUSD
         self.lastActivityAt = summary.lastActivityAt
         self.attributions = summary.attributions
@@ -318,9 +504,14 @@ private struct GenerationLedgerCache: Codable {
     }
 
     var isValid: Bool {
-        !sourcePath.isEmpty &&
+        schemaVersion == Self.currentSchemaVersion &&
+            !sourcePath.isEmpty &&
             sourceModificationTime.isFinite &&
             indexedByteOffset <= sourceSize &&
+            witness.isValid(
+                sourceSize: sourceSize,
+                indexedByteOffset: indexedByteOffset
+            ) &&
             totalSpendUSD.isFinite &&
             totalSpendUSD >= 0 &&
             malformedLineCount >= 0 &&
@@ -334,6 +525,42 @@ private struct GenerationLedgerCache: Codable {
             sourceDevice == source.device &&
             sourceFileNumber == source.fileNumber
     }
+}
+
+private struct SourceContinuityWitness: Codable {
+    static let maximumBoundedBytes: UInt64 = 4 * 1_024
+
+    let prefixLength: UInt64
+    let prefixHash: UInt64
+    let boundaryStart: UInt64
+    let boundaryLength: UInt64
+    let boundaryHash: UInt64
+    let incompleteTailLength: UInt64
+    let incompleteTailHash: UInt64
+
+    func isValid(sourceSize: UInt64, indexedByteOffset: UInt64) -> Bool {
+        prefixLength == min(Self.maximumBoundedBytes, sourceSize) &&
+            boundaryLength == min(Self.maximumBoundedBytes, indexedByteOffset) &&
+            boundaryStart == indexedByteOffset - boundaryLength &&
+            incompleteTailLength == sourceSize - indexedByteOffset
+    }
+}
+
+private struct StableByteHasher {
+    static let offsetBasis: UInt64 = 14_695_981_039_346_656_037
+    private(set) var value = offsetBasis
+
+    mutating func update(_ data: Data) {
+        for byte in data {
+            value = (value ^ UInt64(byte)) &* 1_099_511_628_211
+        }
+    }
+}
+
+private func stableHash(_ data: Data) -> UInt64 {
+    var hasher = StableByteHasher()
+    hasher.update(data)
+    return hasher.value
 }
 
 private struct SourceMetadata {
@@ -395,7 +622,10 @@ private struct LedgerAccumulator {
         }
 
         guard let cost = record.costUSD, cost.isFinite, cost >= 0 else { return }
-        totalSpendUSD += cost
+        let candidateTotal = totalSpendUSD + cost
+        if candidateTotal.isFinite {
+            totalSpendUSD = candidateTotal
+        }
         guard record.status == nil || record.status == "ok",
               let output = record.output?.local,
               let path = normalizedOutputPath(
@@ -533,8 +763,16 @@ private extension ProjectReference {
 private extension JSONEncoder {
     static var generationLedger: JSONEncoder {
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        encoder.dateEncodingStrategy = .secondsSince1970
         encoder.outputFormatting = [.sortedKeys]
         return encoder
+    }
+}
+
+private extension JSONDecoder {
+    static var generationLedger: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        return decoder
     }
 }

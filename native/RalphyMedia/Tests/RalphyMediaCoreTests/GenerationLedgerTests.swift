@@ -118,7 +118,7 @@ import Testing
     let unchanged = await resumedIndex.summary(for: project, root: root.url)
 
     #expect(first.indexedByteOffset == UInt64(initial.utf8.count))
-    #expect(spy.openOffsets == [0, UInt64(initial.utf8.count)])
+    #expect(spy.openOffsets.contains(UInt64(initial.utf8.count)))
     #expect(spy.maximumRequestedByteCount <= GenerationLedgerByteReader.defaultChunkSize)
     #expect(abs(second.totalSpendUSD - 0.60) < 0.000_001)
     #expect(unchanged.totalSpendUSD == second.totalSpendUSD)
@@ -148,7 +148,7 @@ import Testing
     let second = await index.summary(for: project, root: root.url)
 
     #expect(first.indexedByteOffset == UInt64(complete.utf8.count))
-    #expect(spy.openOffsets == [0, UInt64(complete.utf8.count)])
+    #expect(spy.openOffsets.contains(UInt64(complete.utf8.count)))
     #expect(abs(second.totalSpendUSD - 0.40) < 0.000_001)
 }
 
@@ -179,6 +179,38 @@ import Testing
     #expect(spy.openOffsets.last == 0)
     #expect(rebuilt.totalSpendUSD == 0.40)
     #expect(Array(rebuilt.attributions.keys) == ["artifacts/images/rebuilt.png"])
+}
+
+@Test func ledgerRebuildsAfterSameInodeTruncateAndRegrow() async throws {
+    let root = try TemporaryRalphy.make()
+    let project = ProjectReference(workspaceID: "ws", projectID: "p")
+    let relativeLog = "\(project.relativePath)/logs/generations.jsonl"
+    let logURL = root.url.appending(path: relativeLog)
+    try root.write(
+        relativeLog,
+        string: generationLine(cost: 0.10, output: "artifacts/images/old.png") + "\n"
+    )
+    let originalFileNumber = try fileNumber(at: logURL)
+    let spy = LedgerByteReaderSpy()
+    let index = GenerationLedgerIndex(
+        cacheDirectory: root.url.appending(path: "cache"),
+        byteReader: spy.reader
+    )
+    _ = await index.summary(for: project, root: root.url)
+
+    try replaceContents(
+        of: logURL,
+        with: [
+            generationLine(cost: 0.40, output: "artifacts/images/rebuilt-a.png"),
+            generationLine(cost: 0.50, output: "artifacts/images/rebuilt-b-with-a-longer-name.png"),
+        ].joined(separator: "\n") + "\n"
+    )
+    let rebuilt = await index.summary(for: project, root: root.url)
+
+    #expect(try fileNumber(at: logURL) == originalFileNumber)
+    #expect(spy.openOffsets.last == 0)
+    #expect(abs(rebuilt.totalSpendUSD - 0.90) < 0.000_001)
+    #expect(rebuilt.attributions["artifacts/images/old.png"] == nil)
 }
 
 @Test func ledgerRebuildsAfterAtomicSourceReplacement() async throws {
@@ -222,8 +254,57 @@ import Testing
 
     let rebuilt = await index.summary(for: project, root: root.url)
 
-    #expect(spy.openOffsets == [0, 0])
+    #expect(Set(spy.openOffsets) == [0])
     #expect(rebuilt.totalSpendUSD == 0.10)
+}
+
+@Test func ledgerRebuildsWhenCachedOffsetIsNotALineBoundary() async throws {
+    let root = try TemporaryRalphy.make()
+    let project = ProjectReference(workspaceID: "ws", projectID: "p")
+    let relativeLog = "\(project.relativePath)/logs/generations.jsonl"
+    let logURL = root.url.appending(path: relativeLog)
+    try root.write(
+        relativeLog,
+        string: generationLine(cost: 0.10, output: "artifacts/images/a.png") + "\n"
+    )
+    let cache = root.url.appending(path: "cache")
+    let spy = LedgerByteReaderSpy()
+    let index = GenerationLedgerIndex(cacheDirectory: cache, byteReader: spy.reader)
+    _ = await index.summary(for: project, root: root.url)
+    try mutateCache(in: cache) { $0["indexedByteOffset"] = 5 }
+
+    try append(generationLine(cost: 0.20, output: "artifacts/images/b.png") + "\n", to: logURL)
+    let rebuilt = await index.summary(for: project, root: root.url)
+
+    #expect(spy.openOffsets.last == 0)
+    #expect(abs(rebuilt.totalSpendUSD - 0.30) < 0.000_001)
+    #expect(rebuilt.malformedLineCount == 0)
+}
+
+@Test func ledgerRebuildsWhenCachedTailContainsACompleteLine() async throws {
+    let root = try TemporaryRalphy.make()
+    let project = ProjectReference(workspaceID: "ws", projectID: "p")
+    let relativeLog = "\(project.relativePath)/logs/generations.jsonl"
+    let logURL = root.url.appending(path: relativeLog)
+    let first = generationLine(cost: 0.10, output: "artifacts/images/a.png") + "\n"
+    try root.write(
+        relativeLog,
+        string: first + generationLine(cost: 0.20, output: "artifacts/images/b.png") + "\n"
+    )
+    let cache = root.url.appending(path: "cache")
+    let spy = LedgerByteReaderSpy()
+    let index = GenerationLedgerIndex(cacheDirectory: cache, byteReader: spy.reader)
+    _ = await index.summary(for: project, root: root.url)
+    try mutateCache(in: cache) {
+        $0["indexedByteOffset"] = UInt64(first.utf8.count)
+    }
+
+    try append(generationLine(cost: 0.30, output: "artifacts/images/c.png") + "\n", to: logURL)
+    let rebuilt = await index.summary(for: project, root: root.url)
+
+    #expect(spy.openOffsets.last == 0)
+    #expect(abs(rebuilt.totalSpendUSD - 0.60) < 0.000_001)
+    #expect(rebuilt.malformedLineCount == 0)
 }
 
 @Test func ledgerRebuildsAfterSemanticallyInvalidCache() async throws {
@@ -246,8 +327,45 @@ import Testing
 
     let rebuilt = await index.summary(for: project, root: root.url)
 
-    #expect(spy.openOffsets == [0, 0])
+    #expect(Set(spy.openOffsets) == [0])
     #expect(rebuilt.totalSpendUSD == 0.10)
+}
+
+@Test func ledgerCacheResumePreservesFractionalTimestampOrdering() async throws {
+    let root = try TemporaryRalphy.make()
+    let project = ProjectReference(workspaceID: "ws", projectID: "p")
+    let relativeLog = "\(project.relativePath)/logs/generations.jsonl"
+    let logURL = root.url.appending(path: relativeLog)
+    try root.write(
+        relativeLog,
+        string: generationLine(
+            cost: 0.10,
+            output: "artifacts/images/a.png",
+            timestamp: "2026-07-30T08:00:00.900Z",
+            model: "newer"
+        ) + "\n"
+    )
+    let cache = root.url.appending(path: "cache")
+    _ = await GenerationLedgerIndex(cacheDirectory: cache)
+        .summary(for: project, root: root.url)
+    try append(
+        generationLine(
+            cost: 0.20,
+            output: "artifacts/images/a.png",
+            timestamp: "2026-07-30T08:00:00.500Z",
+            model: "older"
+        ) + "\n",
+        to: logURL
+    )
+
+    let resumed = await GenerationLedgerIndex(cacheDirectory: cache)
+        .summary(for: project, root: root.url)
+
+    #expect(resumed.attributions["artifacts/images/a.png"]?.model == "newer")
+    #expect(
+        resumed.attributions["artifacts/images/a.png"]?.generatedAt?.timeIntervalSince1970 ==
+            1_785_398_400.9
+    )
 }
 
 @Test func ledgerInvalidationForcesAFullReread() async throws {
@@ -267,7 +385,7 @@ import Testing
     await index.invalidate(project)
     _ = await index.summary(for: project, root: root.url)
 
-    #expect(spy.openOffsets == [0, 0])
+    #expect(Set(spy.openOffsets) == [0])
 }
 
 @Test func ledgerIgnoresNonFiniteAndNegativeCosts() async throws {
@@ -288,6 +406,35 @@ import Testing
     #expect(summary.totalSpendUSD == 0.25)
     #expect(Array(summary.attributions.keys) == ["artifacts/images/valid.png"])
     #expect(summary.malformedLineCount == 1)
+}
+
+@Test func ledgerKeepsAggregateAndCacheFiniteWhenCostsOverflow() async throws {
+    let root = try TemporaryRalphy.make()
+    let project = ProjectReference(workspaceID: "ws", projectID: "p")
+    try root.write(
+        "\(project.relativePath)/logs/generations.jsonl",
+        string: [
+            generationLine(
+                cost: Double.greatestFiniteMagnitude,
+                output: "artifacts/images/a.png"
+            ),
+            generationLine(
+                cost: Double.greatestFiniteMagnitude,
+                output: "artifacts/images/b.png"
+            ),
+        ].joined(separator: "\n") + "\n"
+    )
+    let cache = root.url.appending(path: "cache")
+    let first = await GenerationLedgerIndex(cacheDirectory: cache)
+        .summary(for: project, root: root.url)
+    let cached = await GenerationLedgerIndex(cacheDirectory: cache)
+        .summary(for: project, root: root.url)
+
+    #expect(first.totalSpendUSD == Double.greatestFiniteMagnitude)
+    #expect(first.totalSpendUSD.isFinite)
+    #expect(first.attributions["artifacts/images/b.png"]?.costUSD == Double.greatestFiniteMagnitude)
+    #expect(cached.totalSpendUSD == first.totalSpendUSD)
+    #expect(try cacheFiles(in: cache).count == 1)
 }
 
 @Test func ledgerCancellationDoesNotPublishPartialResultsOrCache() async throws {
@@ -357,6 +504,22 @@ private func cacheFiles(in directory: URL) throws -> [URL] {
         at: directory,
         includingPropertiesForKeys: nil
     ).filter { $0.pathExtension == "json" }
+}
+
+private func mutateCache(
+    in directory: URL,
+    mutation: (inout [String: Any]) -> Void
+) throws {
+    let cacheURL = try #require(cacheFiles(in: directory).first)
+    let data = try Data(contentsOf: cacheURL)
+    var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    mutation(&object)
+    try JSONSerialization.data(withJSONObject: object).write(to: cacheURL, options: .atomic)
+}
+
+private func fileNumber(at url: URL) throws -> UInt64 {
+    let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+    return try #require((attributes[.systemFileNumber] as? NSNumber)?.uint64Value)
 }
 
 private final class LedgerByteReaderSpy: @unchecked Sendable {
