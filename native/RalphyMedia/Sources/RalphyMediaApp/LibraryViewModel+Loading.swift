@@ -44,6 +44,7 @@ extension LibraryViewModel {
         }
         let root = root.standardizedFileURL
         invalidateRootLoad()
+        invalidateCatalogLoad()
         let generation = rootLoadGeneration
         catalogLoadingState = true
         statusText = "Loading workspaces..."

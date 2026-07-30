@@ -775,8 +775,13 @@ func reopeningSameRootRecoversFromStaleMetadataRevision() async throws {
 func reopeningSameRootRetainsPendingAnnotationAfterTransientSaveFailure() async throws {
     let fixture = try ResponsiveLibraryFixture(filenames: ["retry.png"])
     defer { fixture.remove() }
+    let scanner = RefreshBlockingCatalogScanner(refreshResult: .empty)
+    defer { Task { await scanner.releaseRefresh() } }
     let viewModel = LibraryViewModel(
         settings: fixture.settings,
+        catalogScan: { root in
+            try await scanner.scan(root: root)
+        },
         annotationSave: { _ in
             throw ResponsiveLibraryTestError.intentionalSaveFailure
         }
@@ -790,15 +795,31 @@ func reopeningSameRootRetainsPendingAnnotationAfterTransientSaveFailure() async 
     let item = try #require(viewModel.visibleItems.first)
     viewModel.select(item)
     viewModel.setVerdict(.keep)
+    let workspaceIDs = viewModel.catalog.workspaces.map(\.id)
+
+    await viewModel.refreshCatalog()
+    try await waitUntilAsync { await scanner.refreshStarted }
+    #expect(viewModel.isLoadingCatalog)
+
     viewModel.load(root: fixture.rootURL)
 
     try await waitUntil {
         viewModel.errorMessage?.contains("Annotations were not saved") == true
     }
     #expect(!viewModel.isLoadingCatalog)
+    #expect(viewModel.catalogTask == nil)
     #expect(viewModel.hasPendingAnnotationSaves)
     #expect(viewModel.annotation(for: item).verdict == .keep)
     #expect(try MetadataStore(root: fixture.rootURL).annotations[item.relativePath] == nil)
+
+    await scanner.releaseRefresh()
+    try await waitUntilAsync { await scanner.refreshFinished }
+    await Task.yield()
+    #expect(!viewModel.isLoadingCatalog)
+    #expect(viewModel.catalogTask == nil)
+    #expect(viewModel.catalog.workspaces.map(\.id) == workspaceIDs)
+    #expect(viewModel.hasPendingAnnotationSaves)
+    #expect(viewModel.annotation(for: item).verdict == .keep)
 }
 
 @Test @MainActor
@@ -1238,8 +1259,14 @@ private actor SwitchingCatalogScanner {
 }
 
 private actor RefreshBlockingCatalogScanner {
+    private let refreshResult: WorkspaceCatalogSnapshot?
     private var scanCount = 0
     private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var refreshFinished = false
+
+    init(refreshResult: WorkspaceCatalogSnapshot? = nil) {
+        self.refreshResult = refreshResult
+    }
 
     var refreshStarted: Bool {
         scanCount >= 2
@@ -1249,6 +1276,10 @@ private actor RefreshBlockingCatalogScanner {
         scanCount += 1
         if scanCount == 2 {
             await withCheckedContinuation { continuation = $0 }
+            refreshFinished = true
+            if let refreshResult {
+                return refreshResult
+            }
         }
         return try WorkspaceCatalogScanner().scan(root: root)
     }
