@@ -21,8 +21,9 @@ public struct MediaScanner: Sendable {
     public init() {}
 
     public func scan(root: URL, options: ScanOptions = ScanOptions()) throws -> ScanResult {
+        try Task.checkCancellation()
         let root = try validatedRoot(root)
-        return scan(
+        return try scan(
             in: root.appending(path: "workspaces"),
             root: root,
             options: options,
@@ -37,9 +38,10 @@ public struct MediaScanner: Sendable {
         options: ScanOptions = ScanOptions(),
         attributions: [String: GenerationAttribution] = [:]
     ) throws -> ScanResult {
+        try Task.checkCancellation()
         let root = try validatedRoot(root)
         let projectURL = try projectURL(for: project, root: root)
-        return scan(
+        return try scan(
             in: projectURL,
             root: root,
             options: options,
@@ -86,7 +88,8 @@ public struct MediaScanner: Sendable {
         options: ScanOptions,
         project: ProjectReference?,
         attributions: [String: GenerationAttribution]
-    ) -> ScanResult {
+    ) throws -> ScanResult {
+        try Task.checkCancellation()
         let resolvedScanRoot = scanRoot.resolvingSymlinksInPath()
 
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .isRegularFileKey, .fileSizeKey, .creationDateKey, .contentModificationDateKey]
@@ -101,6 +104,7 @@ public struct MediaScanner: Sendable {
         var items: [MediaItem] = []
         var skipped = 0
         for case let fileURL as URL in enumerator {
+            try Task.checkCancellation()
             guard fileURL.resolvingSymlinksInPath().isDescendant(of: resolvedScanRoot) else {
                 enumerator.skipDescendants()
                 skipped += 1
@@ -163,6 +167,7 @@ public struct MediaScanner: Sendable {
             ))
         }
 
+        try Task.checkCancellation()
         items.sort { $0.relativePath < $1.relativePath }
         return ScanResult(items: items, skipped: skipped)
     }

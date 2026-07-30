@@ -56,6 +56,26 @@ import Testing
     #expect(result.items.first { $0.filename == "shot.png" }?.generation?.costUSD == 0.15)
 }
 
+@Test func scannerStopsWhenItsTaskIsAlreadyCancelled() async throws {
+    let root = try TemporaryRalphy.make()
+    try root.write("workspaces/ws/projects/one/render/final.mp4", bytes: [1])
+    let gate = ScannerCancellationGate()
+    let task = Task {
+        await gate.wait()
+        return try MediaScanner().scan(
+            project: ProjectReference(workspaceID: "ws", projectID: "one"),
+            root: root.url
+        )
+    }
+
+    task.cancel()
+    await gate.release()
+
+    await #expect(throws: CancellationError.self) {
+        try await task.value
+    }
+}
+
 @Test func scannerRejectsMissingAndEscapingProjects() throws {
     let root = try TemporaryRalphy.make()
 
@@ -190,5 +210,21 @@ import Testing
 
     #expect(throws: MediaScannerError.notRalphyRoot) {
         _ = try MediaScanner().scan(root: folder)
+    }
+}
+
+private actor ScannerCancellationGate {
+    private var isOpen = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        isOpen = true
+        continuation?.resume()
+        continuation = nil
     }
 }

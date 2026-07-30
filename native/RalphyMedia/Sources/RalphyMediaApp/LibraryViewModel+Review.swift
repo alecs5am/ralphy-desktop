@@ -5,14 +5,14 @@ import RalphyMediaCore
 extension LibraryViewModel {
     func beginTermination() {
         isTerminating = true
-        rootLoadGeneration &+= 1
-        catalogGeneration &+= 1
-        catalogTask?.cancel()
+        invalidateRootLoad()
+        invalidateCatalogLoad()
         invalidateProjectLoads()
     }
 
     func cancelTermination() {
         isTerminating = false
+        invalidateCatalogLoad()
     }
 
     func annotation(for item: MediaItem) -> MediaAnnotation {
@@ -111,9 +111,8 @@ extension LibraryViewModel {
               !pending.isEmpty else {
             return
         }
-        rootLoadGeneration &+= 1
-        catalogGeneration &+= 1
-        catalogTask?.cancel()
+        invalidateRootLoad()
+        invalidateCatalogLoad()
         invalidateProjectLoads()
         pendingTrashConfirmation = nil
         trashProgress = TrashProgress(completed: 0, total: pending.count)

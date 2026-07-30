@@ -43,20 +43,10 @@ extension LibraryViewModel {
             return
         }
         let root = root.standardizedFileURL
-        var isDirectory: ObjCBool = false
-        let workspacesURL = root.appending(path: "workspaces")
-        guard root.lastPathComponent == ".ralphy",
-              FileManager.default.fileExists(
-                atPath: workspacesURL.path,
-                isDirectory: &isDirectory
-              ),
-              isDirectory.boolValue else {
-            errorMessage = "Choose a .ralphy folder that contains a workspaces directory."
-            return
-        }
-
-        rootLoadGeneration &+= 1
+        invalidateRootLoad()
         let generation = rootLoadGeneration
+        catalogLoadingState = true
+        statusText = "Loading workspaces..."
         if pendingAnnotationSaves[root] != nil {
             Task { [weak self] in
                 guard let self else { return }
@@ -68,17 +58,30 @@ extension LibraryViewModel {
                 }
                 switch outcome {
                 case .saved:
-                    self.openValidatedRoot(root, rootGeneration: generation)
+                    self.startRootContextLoad(root, generation: generation)
                 case .reloadRequired:
                     self.cancelPendingSave(for: root)
-                    self.openValidatedRoot(root, rootGeneration: generation)
+                    self.startRootContextLoad(root, generation: generation)
                 case .retryableFailure:
-                    break
+                    self.catalogLoadingState = false
                 }
             }
             return
         }
-        openValidatedRoot(root, rootGeneration: generation)
+        startRootContextLoad(root, generation: generation)
+    }
+
+    func invalidateRootLoad() {
+        rootLoadGeneration &+= 1
+        rootContextTask?.cancel()
+        rootContextTask = nil
+    }
+
+    func invalidateCatalogLoad() {
+        catalogGeneration &+= 1
+        catalogTask?.cancel()
+        catalogTask = nil
+        catalogLoadingState = false
     }
 
     func consumeFolderChanges(_ paths: [String]) {
@@ -150,13 +153,10 @@ extension LibraryViewModel {
         projectGeneration &+= 1
         ledgerGeneration &+= 1
         projectTask?.cancel()
-        projectTask = nil
         ledgerTask?.cancel()
         ledgerTask = nil
         pendingProjectRequest = nil
         pendingProjectRefreshTarget = nil
-        activeProjectGeneration = nil
-        projectComputationInFlight = false
         currentAttributions = [:]
         projectLoadingState = false
         costsLoadingState = false
@@ -181,41 +181,49 @@ extension LibraryViewModel {
         scheduleNextProjectScan()
     }
 
-    private func openValidatedRoot(
+    private func startRootContextLoad(
         _ root: URL,
-        rootGeneration: UInt64
+        generation: UInt64
     ) {
-        guard rootGeneration == rootLoadGeneration,
+        let operation = rootContextLoad
+        rootContextTask = Task { [weak self] in
+            do {
+                let context = try await operation(root)
+                self?.acceptRootContext(
+                    context,
+                    requestedRoot: root,
+                    generation: generation
+                )
+            } catch {
+                self?.rejectRootContext(
+                    error,
+                    requestedRoot: root,
+                    generation: generation
+                )
+            }
+        }
+    }
+
+    private func acceptRootContext(
+        _ context: LibraryContext,
+        requestedRoot: URL,
+        generation: UInt64
+    ) {
+        guard generation == rootLoadGeneration,
+              context.root == requestedRoot,
               !isTrashing,
               !isTerminating else {
             return
         }
-        let context: LibraryContext
-        do {
-            let metadata = try MetadataStore(root: root)
-            context = LibraryContext(
-                root: root,
-                annotations: metadata.annotations,
-                store: metadata,
-                metadataWarning: nil
-            )
-            errorMessage = nil
-        } catch {
-            let metadataURL = root.appending(path: "media-library/library.json")
-            let warning = "Could not read \(metadataURL.path). " +
-                "Media will remain visible, but annotation changes will not be saved: " +
-                error.localizedDescription
-            context = LibraryContext(
-                root: root,
-                annotations: [:],
-                store: nil,
-                metadataWarning: warning
-            )
+        rootContextTask = nil
+        if let warning = context.metadataWarning {
             errorMessage = warning
+        } else {
+            errorMessage = nil
         }
 
         desiredContext = context
-        startWatching(root: root)
+        startWatching(root: context.root)
         invalidateProjectLoads()
         catalogState = .empty
         rootURL = nil
@@ -223,9 +231,30 @@ extension LibraryViewModel {
         clearProjectSurface()
         startCatalogScan(
             context: context,
-            rootGeneration: rootGeneration,
+            rootGeneration: generation,
             restoreSelection: true
         )
+    }
+
+    private func rejectRootContext(
+        _ error: Error,
+        requestedRoot: URL,
+        generation: UInt64
+    ) {
+        guard generation == rootLoadGeneration,
+              !isTrashing,
+              !isTerminating else {
+            return
+        }
+        rootContextTask = nil
+        catalogLoadingState = false
+        if case RootContextLoadError.invalidRoot = error {
+            errorMessage = "Choose a .ralphy folder that contains a workspaces directory."
+        } else if error is CancellationError {
+            return
+        } else {
+            errorMessage = "Could not open \(requestedRoot.path): \(error.localizedDescription)"
+        }
     }
 
     private func startCatalogScan(
@@ -233,9 +262,8 @@ extension LibraryViewModel {
         rootGeneration: UInt64,
         restoreSelection: Bool
     ) {
-        catalogGeneration &+= 1
+        invalidateCatalogLoad()
         let generation = catalogGeneration
-        catalogTask?.cancel()
         catalogLoadingState = true
         statusText = "Loading workspaces..."
         let operation = catalogScan

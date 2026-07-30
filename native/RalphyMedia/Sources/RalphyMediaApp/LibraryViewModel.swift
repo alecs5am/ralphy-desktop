@@ -116,6 +116,9 @@ struct TrashBatchResult: Sendable {
 }
 
 typealias CatalogScanOperation = @Sendable (URL) async throws -> WorkspaceCatalogSnapshot
+typealias RootContextLoadOperation = @Sendable (
+    URL
+) async throws -> LibraryViewModel.LibraryContext
 typealias ProjectScanOperation = @Sendable (
     ProjectReference,
     URL,
@@ -133,6 +136,10 @@ typealias MediaQueryEvaluator = @Sendable (
 ) -> [MediaSection]
 typealias TrashItemOperation = @Sendable (URL) throws -> Void
 typealias AnnotationSaveOperation = @Sendable (MetadataStore) async throws -> MetadataStore
+
+enum RootContextLoadError: Error {
+    case invalidRoot
+}
 
 @MainActor
 final class LibraryViewModel: ObservableObject {
@@ -186,7 +193,7 @@ final class LibraryViewModel: ObservableObject {
         didSet { appSettings.inspectorVisible = inspectorVisible }
     }
 
-    struct LibraryContext {
+    struct LibraryContext: Sendable {
         let root: URL
         var annotations: [String: MediaAnnotation]
         var store: MetadataStore?
@@ -228,6 +235,7 @@ final class LibraryViewModel: ObservableObject {
     }
 
     let appSettings: AppSettings
+    let rootContextLoad: RootContextLoadOperation
     let catalogScan: CatalogScanOperation
     let projectScan: ProjectScanOperation
     let ledgerLoad: LedgerLoadOperation
@@ -248,6 +256,7 @@ final class LibraryViewModel: ObservableObject {
     var primarySelectionID: String?
     var currentScrollAnchorID: String?
     var currentAttributions: [String: GenerationAttribution] = [:]
+    var rootContextTask: Task<Void, Never>?
     var catalogTask: Task<Void, Never>?
     var projectTask: Task<Void, Never>?
     var ledgerTask: Task<Void, Never>?
@@ -316,6 +325,44 @@ final class LibraryViewModel: ObservableObject {
 
     init(
         settings: AppSettings = AppSettings(),
+        rootContextLoad: @escaping RootContextLoadOperation = { root in
+            let root = root.standardizedFileURL
+            var isDirectory: ObjCBool = false
+            let workspacesURL = root.appending(path: "workspaces")
+            guard root.lastPathComponent == ".ralphy",
+                  FileManager.default.fileExists(
+                    atPath: workspacesURL.path,
+                    isDirectory: &isDirectory
+                  ),
+                  isDirectory.boolValue else {
+                throw RootContextLoadError.invalidRoot
+            }
+
+            try Task.checkCancellation()
+            do {
+                let metadata = try MetadataStore(root: root)
+                try Task.checkCancellation()
+                return LibraryContext(
+                    root: root,
+                    annotations: metadata.annotations,
+                    store: metadata,
+                    metadataWarning: nil
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                let metadataURL = root.appending(path: "media-library/library.json")
+                let warning = "Could not read \(metadataURL.path). " +
+                    "Media will remain visible, but annotation changes will not be saved: " +
+                    error.localizedDescription
+                return LibraryContext(
+                    root: root,
+                    annotations: [:],
+                    store: nil,
+                    metadataWarning: warning
+                )
+            }
+        },
         queryEvaluator: @escaping MediaQueryEvaluator = { query, items, annotations in
             query.sections(from: items, annotations: annotations)
         },
@@ -338,6 +385,7 @@ final class LibraryViewModel: ObservableObject {
         annotationSave: AnnotationSaveOperation? = nil
     ) {
         appSettings = settings
+        self.rootContextLoad = rootContextLoad
         self.queryEvaluator = queryEvaluator
         self.catalogScan = catalogScan
         self.projectScan = projectScan

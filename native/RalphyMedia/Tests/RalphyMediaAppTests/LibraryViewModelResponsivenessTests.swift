@@ -87,7 +87,7 @@ func enteringProjectScansOnlyThatProjectReference() async throws {
 }
 
 @Test @MainActor
-func rapidProjectSwitchRejectsStaleFirstScan() async throws {
+func rapidProjectSwitchSerializesScansAndRunsOnlyTheNewestRequest() async throws {
     let fixture = try ResponsiveLibraryFixture(
         filenames: ["stale.mp4"],
         restoreProject: false
@@ -96,6 +96,10 @@ func rapidProjectSwitchRejectsStaleFirstScan() async throws {
     let current = try fixture.addProject(
         projectID: "current",
         filenames: ["current.mp4"]
+    )
+    let newest = try fixture.addProject(
+        projectID: "newest",
+        filenames: ["newest.mp4"]
     )
     let scanner = SwitchingProjectScanner(blocked: fixture.projectReference)
     defer { Task { await scanner.releaseBlockedScan() } }
@@ -119,21 +123,27 @@ func rapidProjectSwitchRejectsStaleFirstScan() async throws {
         await scanner.hasStarted(stale)
     }
     viewModel.enterProject(current)
-    #expect(viewModel.route == .project(current))
+    viewModel.enterProject(newest)
+    #expect(viewModel.route == .project(newest))
     #expect(viewModel.items.isEmpty)
+    #expect(viewModel.isLoadingProject)
 
-    try await waitUntilAsync(timeout: .seconds(1)) {
-        await scanner.hasStarted(current)
-    }
-    try await waitUntil {
-        !viewModel.isLoadingProject
-            && viewModel.items.map(\.filename) == ["current.mp4"]
-    }
+    try await Task.sleep(for: .milliseconds(150))
+    #expect(await scanner.startedProjects == [stale])
+    #expect(await scanner.maximumConcurrentScans == 1)
 
     await scanner.releaseBlockedScan()
+    try await waitUntilAsync { await scanner.hasStarted(newest) }
+    try await waitUntil {
+        !viewModel.isLoadingProject
+            && viewModel.items.map(\.filename) == ["newest.mp4"]
+    }
+
     try await Task.sleep(for: .milliseconds(200))
-    #expect(viewModel.route == .project(current))
-    #expect(viewModel.items.map(\.filename) == ["current.mp4"])
+    #expect(viewModel.route == .project(newest))
+    #expect(viewModel.items.map(\.filename) == ["newest.mp4"])
+    #expect(await scanner.startedProjects == [stale, newest])
+    #expect(await scanner.maximumConcurrentScans == 1)
 }
 
 @Test @MainActor
@@ -185,6 +195,69 @@ func rapidRootSwitchRejectsStaleCatalog() async throws {
 }
 
 @Test @MainActor
+func rootContextLoaderReadsMetadataOffMainThread() async throws {
+    let fixture = try ResponsiveLibraryFixture(
+        filenames: [],
+        restoreProject: false
+    )
+    defer { fixture.remove() }
+    let loader = RootContextThreadRecorder()
+    let expectedRoot = fixture.rootURL.standardizedFileURL
+    let viewModel = LibraryViewModel(
+        settings: fixture.settings,
+        rootContextLoad: { root in
+            try loader.load(root: root)
+        }
+    )
+
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntil {
+        !viewModel.isLoadingCatalog && viewModel.rootURL == expectedRoot
+    }
+
+    #expect(!loader.ranOnMainThread)
+}
+
+@Test @MainActor
+func rapidRootSwitchRejectsStaleRootContext() async throws {
+    let staleFixture = try ResponsiveLibraryFixture(
+        filenames: [],
+        restoreProject: false
+    )
+    defer { staleFixture.remove() }
+    let currentFixture = try ResponsiveLibraryFixture(
+        filenames: [],
+        restoreProject: false
+    )
+    defer { currentFixture.remove() }
+    let loader = SwitchingRootContextLoader(
+        blockedRoot: staleFixture.rootURL
+    )
+    let staleRoot = staleFixture.rootURL
+    defer { Task { await loader.releaseBlockedLoad() } }
+    let viewModel = LibraryViewModel(
+        settings: staleFixture.settings,
+        rootContextLoad: { root in
+            try await loader.load(root: root)
+        }
+    )
+
+    viewModel.load(root: staleRoot)
+    try await waitUntilAsync {
+        await loader.hasStarted(staleRoot)
+    }
+    viewModel.load(root: currentFixture.rootURL)
+    try await waitUntil {
+        !viewModel.isLoadingCatalog
+            && viewModel.rootURL == currentFixture.rootURL.standardizedFileURL
+    }
+
+    await loader.releaseBlockedLoad()
+    try await Task.sleep(for: .milliseconds(200))
+    #expect(viewModel.rootURL == currentFixture.rootURL.standardizedFileURL)
+}
+
+@Test @MainActor
 func catalogRefreshPreservesAnnotationsEditedWhileItLoads() async throws {
     let fixture = try ResponsiveLibraryFixture(filenames: ["review.png"])
     defer { fixture.remove() }
@@ -200,9 +273,10 @@ func catalogRefreshPreservesAnnotationsEditedWhileItLoads() async throws {
     try await waitUntil {
         !viewModel.isLoadingCatalog
             && !viewModel.isLoadingProject
-            && viewModel.items.count == 1
+            && !viewModel.isApplyingQuery
+            && viewModel.visibleItems.count == 1
     }
-    let item = try #require(viewModel.items.first)
+    let item = try #require(viewModel.visibleItems.first)
 
     await viewModel.refreshCatalog()
     try await waitUntilAsync { await scanner.refreshStarted }
@@ -213,6 +287,88 @@ func catalogRefreshPreservesAnnotationsEditedWhileItLoads() async throws {
     await scanner.releaseRefresh()
     try await waitUntil { !viewModel.isLoadingCatalog }
     #expect(viewModel.annotation(for: item).verdict == .keep)
+}
+
+@Test @MainActor
+func trashRetiresABlockedCatalogRefresh() async throws {
+    let fixture = try ResponsiveLibraryFixture(filenames: ["remove.png"])
+    defer { fixture.remove() }
+    let scanner = RefreshBlockingCatalogScanner()
+    defer { Task { await scanner.releaseRefresh() } }
+    let viewModel = LibraryViewModel(
+        settings: fixture.settings,
+        catalogScan: { root in
+            try await scanner.scan(root: root)
+        },
+        trashItem: { url in
+            try FileManager.default.removeItem(at: url)
+        }
+    )
+
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntil {
+        !viewModel.isScanning
+            && !viewModel.isApplyingQuery
+            && viewModel.visibleItems.count == 1
+    }
+    await viewModel.refreshCatalog()
+    try await waitUntilAsync { await scanner.refreshStarted }
+    #expect(viewModel.isLoadingCatalog)
+
+    viewModel.selectAllVisible()
+    viewModel.requestTrash()
+    viewModel.confirmTrash()
+
+    #expect(!viewModel.isLoadingCatalog)
+    #expect(viewModel.catalogTask == nil)
+    try await waitUntil { !viewModel.isTrashing }
+    await scanner.releaseRefresh()
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(!viewModel.isLoadingCatalog)
+}
+
+@Test @MainActor
+func failedTerminationRollbackRetiresABlockedCatalogRefresh() async throws {
+    let fixture = try ResponsiveLibraryFixture(filenames: ["keep.png"])
+    defer { fixture.remove() }
+    let scanner = RefreshBlockingCatalogScanner()
+    defer { Task { await scanner.releaseRefresh() } }
+    let viewModel = LibraryViewModel(
+        settings: fixture.settings,
+        catalogScan: { root in
+            try await scanner.scan(root: root)
+        },
+        annotationSave: { _ in
+            throw ResponsiveLibraryTestError.intentionalSaveFailure
+        }
+    )
+
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntil {
+        !viewModel.isScanning
+            && !viewModel.isApplyingQuery
+            && viewModel.visibleItems.count == 1
+    }
+    viewModel.selectAllVisible()
+    viewModel.setVerdict(.keep)
+    #expect(viewModel.hasPendingAnnotationSaves)
+
+    await viewModel.refreshCatalog()
+    try await waitUntilAsync { await scanner.refreshStarted }
+    #expect(viewModel.isLoadingCatalog)
+
+    viewModel.beginTermination()
+    #expect(!viewModel.isLoadingCatalog)
+    #expect(viewModel.catalogTask == nil)
+    #expect(await !viewModel.completePendingTerminationWork())
+    viewModel.cancelTermination()
+
+    #expect(!viewModel.isTerminating)
+    #expect(!viewModel.isLoadingCatalog)
+    #expect(viewModel.catalogTask == nil)
+    await scanner.releaseRefresh()
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(!viewModel.isLoadingCatalog)
 }
 
 @Test @MainActor
@@ -639,6 +795,7 @@ func reopeningSameRootRetainsPendingAnnotationAfterTransientSaveFailure() async 
     try await waitUntil {
         viewModel.errorMessage?.contains("Annotations were not saved") == true
     }
+    #expect(!viewModel.isLoadingCatalog)
     #expect(viewModel.hasPendingAnnotationSaves)
     #expect(viewModel.annotation(for: item).verdict == .keep)
     #expect(try MetadataStore(root: fixture.rootURL).annotations[item.relativePath] == nil)
@@ -885,6 +1042,64 @@ private final class BlockingQueryEvaluator: @unchecked Sendable {
     }
 }
 
+private final class RootContextThreadRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var observedMainThread = false
+
+    var ranOnMainThread: Bool {
+        lock.withLock { observedMainThread }
+    }
+
+    func load(root: URL) throws -> LibraryViewModel.LibraryContext {
+        lock.withLock {
+            observedMainThread = observedMainThread || Thread.isMainThread
+        }
+        let store = try MetadataStore(root: root)
+        return LibraryViewModel.LibraryContext(
+            root: root.standardizedFileURL,
+            annotations: store.annotations,
+            store: store,
+            metadataWarning: nil
+        )
+    }
+}
+
+private actor SwitchingRootContextLoader {
+    private let blockedRoot: URL
+    private var startedRoots: Set<URL> = []
+    private var released = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    init(blockedRoot: URL) {
+        self.blockedRoot = blockedRoot.standardizedFileURL
+    }
+
+    func load(root: URL) async throws -> LibraryViewModel.LibraryContext {
+        let root = root.standardizedFileURL
+        startedRoots.insert(root)
+        if root == blockedRoot, !released {
+            await withCheckedContinuation { continuation = $0 }
+        }
+        let store = try MetadataStore(root: root)
+        return LibraryViewModel.LibraryContext(
+            root: root,
+            annotations: store.annotations,
+            store: store,
+            metadataWarning: nil
+        )
+    }
+
+    func hasStarted(_ root: URL) -> Bool {
+        startedRoots.contains(root.standardizedFileURL)
+    }
+
+    func releaseBlockedLoad() {
+        released = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 private final class BlockingTrashOperation: @unchecked Sendable {
     private let condition = NSCondition()
     private var started = false
@@ -1046,7 +1261,9 @@ private actor RefreshBlockingCatalogScanner {
 
 private actor SwitchingProjectScanner {
     private let blocked: ProjectReference
-    private var started: Set<ProjectReference> = []
+    private(set) var startedProjects: [ProjectReference] = []
+    private(set) var maximumConcurrentScans = 0
+    private var activeScans = 0
     private var released = false
     private var continuation: CheckedContinuation<Void, Never>?
 
@@ -1060,7 +1277,10 @@ private actor SwitchingProjectScanner {
         options: ScanOptions,
         attributions: [String: GenerationAttribution]
     ) async throws -> ScanResult {
-        started.insert(project)
+        startedProjects.append(project)
+        activeScans += 1
+        maximumConcurrentScans = max(maximumConcurrentScans, activeScans)
+        defer { activeScans -= 1 }
         if project == blocked, !released {
             await withCheckedContinuation { continuation = $0 }
         }
@@ -1073,7 +1293,7 @@ private actor SwitchingProjectScanner {
     }
 
     func hasStarted(_ project: ProjectReference) -> Bool {
-        started.contains(project)
+        startedProjects.contains(project)
     }
 
     func releaseBlockedScan() {
