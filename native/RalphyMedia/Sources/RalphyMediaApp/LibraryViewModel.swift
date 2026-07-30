@@ -664,10 +664,8 @@ final class LibraryViewModel: ObservableObject {
     private func startWatching(root: URL) {
         watcher?.stop()
         watcher = FolderWatcher(root: root) { [weak self] in
-            Task { @MainActor in
-                guard self?.desiredContext?.root == root else { return }
-                self?.requestScan()
-            }
+            guard self?.desiredContext?.root == root else { return }
+            self?.requestScan()
         }
         watcher?.start()
     }

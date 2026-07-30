@@ -3,13 +3,16 @@ import Foundation
 
 final class FolderWatcher {
     private let workspacesURL: URL
-    private let onChange: () -> Void
+    private let onChange: MainActorCallback
     private var stream: FSEventStreamRef?
     private let queue = DispatchQueue(label: "app.ralphy.media.folder-watcher")
 
-    init(root: URL, onChange: @escaping () -> Void) {
+    init(
+        root: URL,
+        onChange: @escaping @MainActor @Sendable () -> Void
+    ) {
         self.workspacesURL = root.appending(path: "workspaces")
-        self.onChange = onChange
+        self.onChange = MainActorCallback(action: onChange)
     }
 
     deinit {
@@ -30,7 +33,7 @@ final class FolderWatcher {
         let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
             guard let info else { return }
             let watcher = Unmanaged<FolderWatcher>.fromOpaque(info).takeUnretainedValue()
-            watcher.onChange()
+            watcher.onChange.call()
         }
 
         stream = FSEventStreamCreate(
@@ -55,5 +58,15 @@ final class FolderWatcher {
         FSEventStreamStop(stream)
         FSEventStreamInvalidate(stream)
         FSEventStreamRelease(stream)
+    }
+}
+
+private struct MainActorCallback: Sendable {
+    let action: @MainActor @Sendable () -> Void
+
+    func call() {
+        Task { @MainActor in
+            action()
+        }
     }
 }
