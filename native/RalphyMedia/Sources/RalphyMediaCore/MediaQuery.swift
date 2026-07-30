@@ -11,6 +11,17 @@ public enum MediaGroup: String, CaseIterable, Hashable, Sendable {
     case workspace
     case project
     case type
+    case entity
+    case folder
+}
+
+public enum ProjectMode: String, CaseIterable, Hashable, Sendable {
+    case overview
+    case finals
+    case assets
+    case refs
+    case units
+    case files
 }
 
 public struct MediaSection: Identifiable, Hashable, Sendable {
@@ -32,6 +43,7 @@ public struct MediaQuery: Sendable {
     public var favoriteOnly: Bool
     public var workspace: String?
     public var project: String?
+    public var mode: ProjectMode
     public var bucket: MediaBucket?
     public var sort: MediaSort
     public var group: MediaGroup
@@ -43,6 +55,7 @@ public struct MediaQuery: Sendable {
         favoriteOnly: Bool = false,
         workspace: String? = nil,
         project: String? = nil,
+        mode: ProjectMode = .overview,
         bucket: MediaBucket? = nil,
         sort: MediaSort = .name,
         group: MediaGroup = .none
@@ -53,6 +66,7 @@ public struct MediaQuery: Sendable {
         self.favoriteOnly = favoriteOnly
         self.workspace = workspace
         self.project = project
+        self.mode = mode
         self.bucket = bucket
         self.sort = sort
         self.group = group
@@ -65,6 +79,7 @@ public struct MediaQuery: Sendable {
         let search = normalized(search ?? "")
         let filtered = items.filter { item in
             let annotation = annotations[item.relativePath] ?? MediaAnnotation()
+            guard mode.includes(item.entity) else { return false }
             guard verdict == nil || annotation.verdict == verdict else { return false }
             guard !excludeRejected || annotation.verdict != .reject else { return false }
             guard !favoriteOnly || annotation.favorite else { return false }
@@ -129,6 +144,33 @@ public struct MediaQuery: Sendable {
         case .workspace: item.workspace
         case .project: item.project
         case .type: item.bucket.rawValue
+        case .entity: item.entity.rawValue
+        case .folder: projectRelativeComponents(for: item).first.map(String.init) ?? "Project root"
+        }
+    }
+
+    private func projectRelativeComponents(for item: MediaItem) -> [Substring] {
+        let components = item.relativePath.split(separator: "/")
+        guard components.count > 4,
+              components[0] == "workspaces",
+              components[1] == item.workspace,
+              components[2] == "projects",
+              components[3] == item.project else {
+            return []
+        }
+        return Array(components.dropFirst(4))
+    }
+}
+
+private extension ProjectMode {
+    func includes(_ entity: RalphyEntityKind) -> Bool {
+        switch self {
+        case .overview: true
+        case .finals: entity == .finalRender
+        case .assets: entity == .generatedAsset
+        case .refs: entity == .reference
+        case .units: entity == .unit
+        case .files: entity == .productionFile
         }
     }
 }

@@ -42,6 +42,39 @@ import Testing
     #expect(sections[1].items.map(\.id) == ["other-project"])
 }
 
+@Test func queryFiltersEachProjectModeByEntityBeforeOtherFilters() {
+    let items = [
+        queryItem(id: "final", relativePath: "workspaces/ws/projects/p/render/final.mp4", workspace: "ws", project: "p", bucket: .video, modifiedAt: 1, entity: .finalRender),
+        queryItem(id: "asset", relativePath: "workspaces/ws/projects/p/artifacts/images/asset.png", workspace: "ws", project: "p", bucket: .image, modifiedAt: 2, entity: .generatedAsset),
+        queryItem(id: "ref", relativePath: "workspaces/ws/projects/p/artifacts/refs/ref.png", workspace: "ws", project: "p", bucket: .image, modifiedAt: 3, entity: .reference),
+        queryItem(id: "unit", relativePath: "workspaces/ws/projects/p/units/ad-01/video.mp4", workspace: "ws", project: "p", bucket: .video, modifiedAt: 4, entity: .unit),
+        queryItem(id: "file", relativePath: "workspaces/ws/projects/p/logs/run.log", workspace: "ws", project: "p", bucket: .text, modifiedAt: 5, entity: .productionFile),
+        queryItem(id: "lifecycle", relativePath: "workspaces/ws/projects/p/BRIEF.md", workspace: "ws", project: "p", bucket: .text, modifiedAt: 6, entity: .lifecycleDocument),
+    ]
+
+    #expect(MediaQuery(mode: .overview).apply(to: items, annotations: [:]).map(\.id) == ["asset", "lifecycle", "final", "ref", "file", "unit"])
+    #expect(MediaQuery(mode: .finals).apply(to: items, annotations: [:]).map(\.id) == ["final"])
+    #expect(MediaQuery(mode: .assets).apply(to: items, annotations: [:]).map(\.id) == ["asset"])
+    #expect(MediaQuery(mode: .refs).apply(to: items, annotations: [:]).map(\.id) == ["ref"])
+    #expect(MediaQuery(mode: .units).apply(to: items, annotations: [:]).map(\.id) == ["unit"])
+    #expect(MediaQuery(mode: .files).apply(to: items, annotations: [:]).map(\.id) == ["file"])
+}
+
+@Test func queryGroupsProjectItemsByEntityAndFirstProjectFolder() {
+    let items = [
+        queryItem(id: "asset", relativePath: "workspaces/ws/projects/p/artifacts/images/asset.png", workspace: "ws", project: "p", bucket: .image, modifiedAt: 1, entity: .generatedAsset),
+        queryItem(id: "ref", relativePath: "workspaces/ws/projects/p/artifacts/refs/ref.png", workspace: "ws", project: "p", bucket: .image, modifiedAt: 2, entity: .reference),
+        queryItem(id: "unit", relativePath: "workspaces/ws/projects/p/units/ad-01/video.mp4", workspace: "ws", project: "p", bucket: .video, modifiedAt: 3, entity: .unit),
+    ]
+
+    let entitySections = MediaQuery(group: .entity).sections(from: items, annotations: [:])
+    let folderSections = MediaQuery(group: .folder).sections(from: items, annotations: [:])
+
+    #expect(entitySections.map(\.title) == ["generatedAsset", "reference", "unit"])
+    #expect(folderSections.map(\.title) == ["artifacts", "units"])
+    #expect(folderSections[0].items.map(\.id) == ["asset", "ref"])
+}
+
 @Test func queryUsesRelativePathAsFinalSortTieBreaker() {
     let items = [
         queryItem(id: "b", relativePath: "b.mp4", workspace: "ws", project: "p", bucket: .video, modifiedAt: 1),
@@ -127,7 +160,8 @@ private func queryItem(
     workspace: String,
     project: String,
     bucket: MediaBucket,
-    modifiedAt: TimeInterval
+    modifiedAt: TimeInterval,
+    entity: RalphyEntityKind = .finalRender
 ) -> MediaItem {
     MediaItem(
         id: id,
@@ -140,6 +174,7 @@ private func queryItem(
         fileExtension: URL(filePath: relativePath).pathExtension,
         sizeBytes: 1,
         createdAt: nil,
-        modifiedAt: Date(timeIntervalSince1970: modifiedAt)
+        modifiedAt: Date(timeIntervalSince1970: modifiedAt),
+        entity: entity
     )
 }

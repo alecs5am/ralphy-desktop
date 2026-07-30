@@ -25,6 +25,54 @@ import Testing
     #expect(result.skipped == 0)
 }
 
+@Test func scannerIndexesOnlyTheRequestedProjectAndClassifiesEntities() throws {
+    let root = try TemporaryRalphy.make()
+    try root.write("workspaces/ws/projects/one/render/final.mp4", bytes: [1])
+    try root.write("workspaces/ws/projects/one/artifacts/refs/logo.png", bytes: [1])
+    try root.write("workspaces/ws/projects/one/artifacts/images/shot.png", bytes: [1])
+    try root.write("workspaces/ws/projects/one/units/ad-01/video.mp4", bytes: [1])
+    try root.write("workspaces/ws/projects/one/BRIEF.md", string: "# Brief")
+    try root.write("workspaces/ws/projects/two/artifacts/images/other.png", bytes: [1])
+
+    let result = try MediaScanner().scan(
+        project: ProjectReference(workspaceID: "ws", projectID: "one"),
+        root: root.url,
+        attributions: [
+            "artifacts/images/./shot.png": GenerationAttribution(
+                costUSD: 0.15,
+                provider: "provider",
+                model: "model",
+                generatedAt: nil
+            ),
+        ]
+    )
+
+    #expect(result.items.map(\.project) == Array(repeating: "one", count: 5))
+    #expect(result.items.first { $0.filename == "final.mp4" }?.entity == .finalRender)
+    #expect(result.items.first { $0.filename == "logo.png" }?.entity == .reference)
+    #expect(result.items.first { $0.filename == "shot.png" }?.entity == .generatedAsset)
+    #expect(result.items.first { $0.relativePath.contains("/units/") }?.entity == .unit)
+    #expect(result.items.first { $0.filename == "BRIEF.md" }?.entity == .lifecycleDocument)
+    #expect(result.items.first { $0.filename == "shot.png" }?.generation?.costUSD == 0.15)
+}
+
+@Test func scannerRejectsMissingAndEscapingProjects() throws {
+    let root = try TemporaryRalphy.make()
+
+    #expect(throws: MediaScannerError.self) {
+        _ = try MediaScanner().scan(
+            project: ProjectReference(workspaceID: "ws", projectID: "missing"),
+            root: root.url
+        )
+    }
+    #expect(throws: MediaScannerError.self) {
+        _ = try MediaScanner().scan(
+            project: ProjectReference(workspaceID: "ws", projectID: "../other"),
+            root: root.url
+        )
+    }
+}
+
 @Test func scannerSkipsInternalRenderWorkByDefault() throws {
     let root = try TemporaryRalphy.make()
     try root.write("workspaces/ws/projects/p/render/work-123/frame.jpg", bytes: [1])
