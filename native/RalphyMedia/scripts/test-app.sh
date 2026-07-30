@@ -8,18 +8,37 @@ info_plist="$app_bundle/Contents/Info.plist"
 executable="$app_bundle/Contents/MacOS/RalphyMedia"
 fresh_pid=""
 
-[[ $# -eq 1 && -d "$1" ]] || {
-    printf 'Usage: %s ROOT_DIRECTORY\n' "$0" >&2
-    exit 2
+is_bundle_command() {
+    local command="$1"
+    [[ "$command" == "$executable" || "$command" == "$executable"[[:space:]]* ]]
 }
-root="$(cd "$1" && pwd -P)"
 
 is_bundle_process() {
     local pid="$1"
     local command
     command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-    [[ "$command" == "$executable"* ]]
+    is_bundle_command "$command"
 }
+
+bundle_process_ids() {
+    local pid
+    while IFS= read -r pid; do
+        [[ -n "$pid" ]] && is_bundle_process "$pid" && printf '%s\n' "$pid"
+    done < <(pgrep -f "$executable" || true)
+}
+
+if [[ "${TEST_APP_MATCHER_CHECK:-}" == "1" ]]; then
+    is_bundle_command "$executable --scan-only /tmp"
+    ! is_bundle_command "${executable}Helper --scan-only /tmp"
+    printf 'Process matcher check passed.\n'
+    exit 0
+fi
+
+[[ $# -eq 1 && -d "$1" ]] || {
+    printf 'Usage: %s ROOT_DIRECTORY\n' "$0" >&2
+    exit 2
+}
+root="$(cd "$1" && pwd -P)"
 
 cleanup() {
     if [[ -n "$fresh_pid" ]] && is_bundle_process "$fresh_pid"; then
@@ -43,7 +62,7 @@ fi
 
 "$executable" --scan-only "$root"
 
-existing_pids="$(pgrep -f "$executable" || true)"
+existing_pids="$(bundle_process_ids)"
 is_existing_pid() {
     local pid="$1"
     local existing_pid
@@ -62,7 +81,7 @@ while (( SECONDS < deadline )); do
             fresh_pid="$pid"
             break 2
         fi
-    done < <(pgrep -f "$executable" || true)
+    done < <(bundle_process_ids)
     sleep 0.1
 done
 
