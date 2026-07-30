@@ -5,6 +5,380 @@ import Testing
 @testable import RalphyMediaApp
 
 @Test @MainActor
+func openingLibraryPublishesCatalogWithoutScanningMedia() async throws {
+    let fixture = try ResponsiveLibraryFixture(
+        filenames: ["first.mp4"],
+        restoreProject: false
+    )
+    defer { fixture.remove() }
+    _ = try fixture.addProject(
+        workspaceID: "second-workspace",
+        projectID: "second-project",
+        filenames: ["second.mp4"]
+    )
+    let recorder = LoadRecorder()
+    let viewModel = LibraryViewModel(
+        settings: fixture.settings,
+        catalogScan: { root in
+            try await recorder.scanCatalog(root: root)
+        },
+        projectScan: { project, root, options, attributions in
+            try await recorder.scanProject(
+                project: project,
+                root: root,
+                options: options,
+                attributions: attributions
+            )
+        },
+        ledgerLoad: { project, root in
+            await recorder.loadLedger(project: project, root: root)
+        }
+    )
+
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntil {
+        !viewModel.isLoadingCatalog && viewModel.workspaces.count == 2
+    }
+
+    #expect(await recorder.catalogCount == 1)
+    #expect(await recorder.projectReferences.isEmpty)
+    #expect(await recorder.ledgerReferences.isEmpty)
+    #expect(viewModel.route == .library)
+    #expect(viewModel.items.isEmpty)
+}
+
+@Test @MainActor
+func enteringProjectScansOnlyThatProjectReference() async throws {
+    let fixture = try ResponsiveLibraryFixture(
+        filenames: ["selected.mp4"],
+        restoreProject: false
+    )
+    defer { fixture.remove() }
+    let other = try fixture.addProject(
+        projectID: "other",
+        filenames: ["ignored.mp4"]
+    )
+    let recorder = LoadRecorder()
+    let viewModel = LibraryViewModel(
+        settings: fixture.settings,
+        catalogScan: { root in
+            try await recorder.scanCatalog(root: root)
+        },
+        projectScan: { project, root, options, attributions in
+            try await recorder.scanProject(
+                project: project,
+                root: root,
+                options: options,
+                attributions: attributions
+            )
+        }
+    )
+
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntil { !viewModel.isLoadingCatalog }
+    viewModel.enterProject(fixture.projectReference)
+    try await waitUntil {
+        !viewModel.isLoadingProject && viewModel.items.count == 1
+    }
+
+    #expect(await recorder.projectReferences == [fixture.projectReference])
+    #expect(!viewModel.items.contains { $0.project == other.projectID })
+    #expect(viewModel.route == .project(fixture.projectReference))
+}
+
+@Test @MainActor
+func rapidProjectSwitchRejectsStaleFirstScan() async throws {
+    let fixture = try ResponsiveLibraryFixture(
+        filenames: ["stale.mp4"],
+        restoreProject: false
+    )
+    defer { fixture.remove() }
+    let current = try fixture.addProject(
+        projectID: "current",
+        filenames: ["current.mp4"]
+    )
+    let scanner = SwitchingProjectScanner(blocked: fixture.projectReference)
+    defer { Task { await scanner.releaseBlockedScan() } }
+    let viewModel = LibraryViewModel(
+        settings: fixture.settings,
+        projectScan: { project, root, options, attributions in
+            try await scanner.scan(
+                project: project,
+                root: root,
+                options: options,
+                attributions: attributions
+            )
+        }
+    )
+
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntil { !viewModel.isLoadingCatalog }
+    let stale = fixture.projectReference
+    viewModel.enterProject(stale)
+    try await waitUntilAsync {
+        await scanner.hasStarted(stale)
+    }
+    viewModel.enterProject(current)
+    #expect(viewModel.route == .project(current))
+    #expect(viewModel.items.isEmpty)
+
+    try await waitUntilAsync(timeout: .seconds(1)) {
+        await scanner.hasStarted(current)
+    }
+    try await waitUntil {
+        !viewModel.isLoadingProject
+            && viewModel.items.map(\.filename) == ["current.mp4"]
+    }
+
+    await scanner.releaseBlockedScan()
+    try await Task.sleep(for: .milliseconds(200))
+    #expect(viewModel.route == .project(current))
+    #expect(viewModel.items.map(\.filename) == ["current.mp4"])
+}
+
+@Test @MainActor
+func rapidRootSwitchRejectsStaleCatalog() async throws {
+    let staleFixture = try ResponsiveLibraryFixture(
+        filenames: ["stale.mp4"],
+        restoreProject: false
+    )
+    defer { staleFixture.remove() }
+    _ = try staleFixture.addProject(
+        workspaceID: "stale-workspace",
+        projectID: "stale-project",
+        filenames: []
+    )
+    let currentFixture = try ResponsiveLibraryFixture(
+        filenames: ["current.mp4"],
+        restoreProject: false
+    )
+    defer { currentFixture.remove() }
+    _ = try currentFixture.addProject(
+        workspaceID: "current-workspace",
+        projectID: "current-project",
+        filenames: []
+    )
+    let scanner = SwitchingCatalogScanner(blockedRoot: staleFixture.rootURL)
+    let viewModel = LibraryViewModel(
+        settings: staleFixture.settings,
+        catalogScan: { root in
+            try await scanner.scan(root: root)
+        }
+    )
+
+    let staleRoot = staleFixture.rootURL
+    viewModel.load(root: staleRoot)
+    try await waitUntilAsync {
+        await scanner.hasStarted(staleRoot)
+    }
+    viewModel.load(root: currentFixture.rootURL)
+    try await waitUntil {
+        !viewModel.isLoadingCatalog
+            && viewModel.rootURL == currentFixture.rootURL.standardizedFileURL
+    }
+    await scanner.releaseBlockedScan()
+    try await Task.sleep(for: .milliseconds(200))
+
+    #expect(viewModel.rootURL == currentFixture.rootURL.standardizedFileURL)
+    #expect(viewModel.catalog.workspaces.contains { $0.id == "current-workspace" })
+    #expect(!viewModel.catalog.workspaces.contains { $0.id == "stale-workspace" })
+}
+
+@Test @MainActor
+func catalogRefreshPreservesAnnotationsEditedWhileItLoads() async throws {
+    let fixture = try ResponsiveLibraryFixture(filenames: ["review.png"])
+    defer { fixture.remove() }
+    let scanner = RefreshBlockingCatalogScanner()
+    let viewModel = LibraryViewModel(
+        settings: fixture.settings,
+        catalogScan: { root in
+            try await scanner.scan(root: root)
+        }
+    )
+
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntil {
+        !viewModel.isLoadingCatalog
+            && !viewModel.isLoadingProject
+            && viewModel.items.count == 1
+    }
+    let item = try #require(viewModel.items.first)
+
+    await viewModel.refreshCatalog()
+    try await waitUntilAsync { await scanner.refreshStarted }
+    viewModel.select(item)
+    viewModel.setVerdict(.keep)
+    #expect(viewModel.annotation(for: item).verdict == .keep)
+
+    await scanner.releaseRefresh()
+    try await waitUntil { !viewModel.isLoadingCatalog }
+    #expect(viewModel.annotation(for: item).verdict == .keep)
+}
+
+@Test @MainActor
+func projectSwitchRejectsStaleLedgerHydration() async throws {
+    let fixture = try ResponsiveLibraryFixture(
+        filenames: ["stale.mp4"],
+        restoreProject: false
+    )
+    defer { fixture.remove() }
+    let current = try fixture.addProject(
+        projectID: "current-ledger",
+        filenames: ["current.mp4"]
+    )
+    let ledger = SwitchingLedgerLoader(blocked: fixture.projectReference)
+    let viewModel = LibraryViewModel(
+        settings: fixture.settings,
+        ledgerLoad: { project, root in
+            await ledger.load(project: project, root: root)
+        }
+    )
+
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntil { !viewModel.isLoadingCatalog }
+    let staleProject = fixture.projectReference
+    viewModel.enterProject(staleProject)
+    try await waitUntilAsync {
+        await ledger.hasStarted(staleProject)
+    }
+    viewModel.enterProject(current)
+    try await waitUntil {
+        viewModel.route == .project(current)
+            && !viewModel.isLoadingCosts
+            && viewModel.projectSpendUSD == 2
+    }
+
+    await ledger.releaseBlockedLoad()
+    try await Task.sleep(for: .milliseconds(200))
+    #expect(viewModel.route == .project(current))
+    #expect(viewModel.projectSpendUSD == 2)
+}
+
+@Test @MainActor
+func ledgerHydrationDecoratesOnlySelectedProjectItems() async throws {
+    let fixture = try ResponsiveLibraryFixture(
+        filenames: ["generated.mp4"],
+        restoreProject: false
+    )
+    defer { fixture.remove() }
+    let recorder = LoadRecorder(
+        ledgerSummary: GenerationLedgerSummary(
+            totalSpendUSD: 0.75,
+            lastActivityAt: nil,
+            attributions: [
+                "render/final/generated.mp4": GenerationAttribution(
+                    costUSD: 0.75,
+                    provider: "test",
+                    model: "deterministic",
+                    generatedAt: nil
+                ),
+            ],
+            malformedLineCount: 0,
+            indexedByteOffset: 0
+        )
+    )
+    let viewModel = LibraryViewModel(
+        settings: fixture.settings,
+        projectScan: { project, root, options, attributions in
+            try await recorder.scanProject(
+                project: project,
+                root: root,
+                options: options,
+                attributions: attributions
+            )
+        },
+        ledgerLoad: { project, root in
+            await recorder.loadLedger(project: project, root: root)
+        }
+    )
+
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntil { !viewModel.isLoadingCatalog }
+    viewModel.enterProject(fixture.projectReference)
+    try await waitUntil {
+        !viewModel.isLoadingProject
+            && !viewModel.isLoadingCosts
+            && viewModel.items.first?.generation?.costUSD == 0.75
+    }
+
+    #expect(viewModel.projectSpendUSD == 0.75)
+    #expect(await recorder.projectReferences == [
+        fixture.projectReference,
+        fixture.projectReference,
+    ])
+    #expect(await recorder.ledgerReferences == [fixture.projectReference])
+}
+
+@Test @MainActor
+func assetNavigationRestoresGridPresentationState() async throws {
+    let fixture = try ResponsiveLibraryFixture(
+        filenames: ["first.mp4", "second.mp4"]
+    )
+    defer { fixture.remove() }
+    let viewModel = LibraryViewModel(settings: fixture.settings)
+
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntil {
+        !viewModel.isScanning
+            && !viewModel.isApplyingQuery
+            && viewModel.visibleItems.count == 2
+    }
+    let first = try #require(viewModel.visibleItems.first)
+    let second = try #require(viewModel.visibleItems.last)
+    viewModel.select(first)
+    viewModel.updateScrollAnchor(second.id)
+    viewModel.openAsset(first)
+    #expect(viewModel.route == .asset(fixture.projectReference, first.id))
+
+    viewModel.showNextAsset()
+    #expect(viewModel.route == .asset(fixture.projectReference, second.id))
+    viewModel.showPreviousAsset()
+    #expect(viewModel.route == .asset(fixture.projectReference, first.id))
+    viewModel.searchText = "changed-in-viewer"
+    viewModel.clearSelection()
+    viewModel.updateScrollAnchor(nil)
+    viewModel.goBack()
+
+    #expect(viewModel.route == .project(fixture.projectReference))
+    #expect(viewModel.searchText.isEmpty)
+    #expect(viewModel.selectedIDs == [first.id])
+    #expect(viewModel.scrollAnchorID == second.id)
+}
+
+@Test @MainActor
+func restoringWorkspaceDoesNotRestoreMissingProject() async throws {
+    let fixture = try ResponsiveLibraryFixture(
+        filenames: ["valid.mp4"],
+        restoreProject: false
+    )
+    defer { fixture.remove() }
+    fixture.settings.selectedWorkspaceID = fixture.projectReference.workspaceID
+    fixture.settings.selectedProjectID = "missing"
+    let recorder = LoadRecorder()
+    let viewModel = LibraryViewModel(
+        settings: fixture.settings,
+        catalogScan: { root in
+            try await recorder.scanCatalog(root: root)
+        },
+        projectScan: { project, root, options, attributions in
+            try await recorder.scanProject(
+                project: project,
+                root: root,
+                options: options,
+                attributions: attributions
+            )
+        }
+    )
+
+    viewModel.load(root: fixture.rootURL)
+    try await waitUntil { !viewModel.isLoadingCatalog }
+
+    #expect(viewModel.route == .workspace(fixture.projectReference.workspaceID))
+    #expect(await recorder.projectReferences.isEmpty)
+    #expect(viewModel.items.isEmpty)
+}
+
+@Test @MainActor
 func queryPipelineRunsOffMainAndDiscardsStaleResults() async throws {
     let fixture = try ResponsiveLibraryFixture(filenames: ["fast.mp4", "slow.mp4"])
     defer { fixture.remove() }
@@ -351,7 +725,7 @@ func pendingRootLoadCannotCompleteAfterTrashStarts() async throws {
     }
 
     viewModel.load(root: rootB.rootURL)
-    try await waitUntilAsync { await saves.startedCount >= 2 }
+    try await waitUntilAsync { await saves.startedCount >= 1 }
 
     viewModel.selectAllVisible()
     viewModel.requestTrash()
@@ -579,6 +953,174 @@ private actor BlockingAnnotationSaveOperation {
     }
 }
 
+private actor LoadRecorder {
+    private let ledgerSummary: GenerationLedgerSummary
+    private(set) var catalogCount = 0
+    private(set) var projectReferences: [ProjectReference] = []
+    private(set) var ledgerReferences: [ProjectReference] = []
+
+    init(ledgerSummary: GenerationLedgerSummary = .empty) {
+        self.ledgerSummary = ledgerSummary
+    }
+
+    func scanCatalog(root: URL) throws -> WorkspaceCatalogSnapshot {
+        catalogCount += 1
+        return try WorkspaceCatalogScanner().scan(root: root)
+    }
+
+    func scanProject(
+        project: ProjectReference,
+        root: URL,
+        options: ScanOptions,
+        attributions: [String: GenerationAttribution]
+    ) throws -> ScanResult {
+        projectReferences.append(project)
+        return try MediaScanner().scan(
+            project: project,
+            root: root,
+            options: options,
+            attributions: attributions
+        )
+    }
+
+    func loadLedger(
+        project: ProjectReference,
+        root: URL
+    ) -> GenerationLedgerSummary {
+        ledgerReferences.append(project)
+        return ledgerSummary
+    }
+}
+
+private actor SwitchingCatalogScanner {
+    private let blockedRoot: URL
+    private var startedRoots: Set<URL> = []
+    private var released = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    init(blockedRoot: URL) {
+        self.blockedRoot = blockedRoot.standardizedFileURL
+    }
+
+    func scan(root: URL) async throws -> WorkspaceCatalogSnapshot {
+        let root = root.standardizedFileURL
+        startedRoots.insert(root)
+        if root == blockedRoot, !released {
+            await withCheckedContinuation { continuation = $0 }
+        }
+        return try WorkspaceCatalogScanner().scan(root: root)
+    }
+
+    func hasStarted(_ root: URL) -> Bool {
+        startedRoots.contains(root.standardizedFileURL)
+    }
+
+    func releaseBlockedScan() {
+        released = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor RefreshBlockingCatalogScanner {
+    private var scanCount = 0
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    var refreshStarted: Bool {
+        scanCount >= 2
+    }
+
+    func scan(root: URL) async throws -> WorkspaceCatalogSnapshot {
+        scanCount += 1
+        if scanCount == 2 {
+            await withCheckedContinuation { continuation = $0 }
+        }
+        return try WorkspaceCatalogScanner().scan(root: root)
+    }
+
+    func releaseRefresh() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor SwitchingProjectScanner {
+    private let blocked: ProjectReference
+    private var started: Set<ProjectReference> = []
+    private var released = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    init(blocked: ProjectReference) {
+        self.blocked = blocked
+    }
+
+    func scan(
+        project: ProjectReference,
+        root: URL,
+        options: ScanOptions,
+        attributions: [String: GenerationAttribution]
+    ) async throws -> ScanResult {
+        started.insert(project)
+        if project == blocked, !released {
+            await withCheckedContinuation { continuation = $0 }
+        }
+        return try MediaScanner().scan(
+            project: project,
+            root: root,
+            options: options,
+            attributions: attributions
+        )
+    }
+
+    func hasStarted(_ project: ProjectReference) -> Bool {
+        started.contains(project)
+    }
+
+    func releaseBlockedScan() {
+        released = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor SwitchingLedgerLoader {
+    private let blocked: ProjectReference
+    private var started: Set<ProjectReference> = []
+    private var released = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    init(blocked: ProjectReference) {
+        self.blocked = blocked
+    }
+
+    func load(
+        project: ProjectReference,
+        root: URL
+    ) async -> GenerationLedgerSummary {
+        started.insert(project)
+        if project == blocked, !released {
+            await withCheckedContinuation { continuation = $0 }
+        }
+        return GenerationLedgerSummary(
+            totalSpendUSD: project == blocked ? 9 : 2,
+            lastActivityAt: nil,
+            attributions: [:],
+            malformedLineCount: 0,
+            indexedByteOffset: 0
+        )
+    }
+
+    func hasStarted(_ project: ProjectReference) -> Bool {
+        started.contains(project)
+    }
+
+    func releaseBlockedLoad() {
+        released = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 private struct ResponsiveLibraryFixture {
     let containerURL: URL
     let rootURL: URL
@@ -586,7 +1128,14 @@ private struct ResponsiveLibraryFixture {
     let defaultsSuite: String
     let settings: AppSettings
 
-    init(filenames: [String]) throws {
+    var projectReference: ProjectReference {
+        ProjectReference(workspaceID: "test", projectID: "responsive")
+    }
+
+    init(
+        filenames: [String],
+        restoreProject: Bool = true
+    ) throws {
         containerURL = FileManager.default.temporaryDirectory
             .appending(path: "RalphyMedia-\(UUID().uuidString)")
         rootURL = containerURL.appending(path: ".ralphy")
@@ -604,6 +1153,28 @@ private struct ResponsiveLibraryFixture {
         for filename in filenames {
             try Data(filename.utf8).write(to: projectURL.appending(path: filename))
         }
+        if restoreProject {
+            settings.selectedWorkspaceID = projectReference.workspaceID
+            settings.selectedProjectID = projectReference.projectID
+        }
+    }
+
+    func addProject(
+        workspaceID: String = "test",
+        projectID: String,
+        filenames: [String]
+    ) throws -> ProjectReference {
+        let directory = rootURL.appending(
+            path: "workspaces/\(workspaceID)/projects/\(projectID)/render/final"
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        for filename in filenames {
+            try Data(filename.utf8).write(to: directory.appending(path: filename))
+        }
+        return ProjectReference(workspaceID: workspaceID, projectID: projectID)
     }
 
     func remove() {

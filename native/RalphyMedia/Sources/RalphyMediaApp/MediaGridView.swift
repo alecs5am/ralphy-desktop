@@ -71,8 +71,7 @@ struct MediaGridView: View {
                                 )
                                 .id(item.id)
                                 .onTapGesture(count: 2) {
-                                    viewModel.select(item)
-                                    viewModel.showQuickLook()
+                                    viewModel.openAsset(item)
                                 }
                                 .onTapGesture {
                                     let modifiers = NSEvent.modifierFlags

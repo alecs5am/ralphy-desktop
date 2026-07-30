@@ -7,7 +7,21 @@ public struct GenerationLedgerSummary: Codable, Sendable {
     public let malformedLineCount: Int
     public let indexedByteOffset: UInt64
 
-    static let empty = GenerationLedgerSummary(
+    public init(
+        totalSpendUSD: Double,
+        lastActivityAt: Date?,
+        attributions: [String: GenerationAttribution],
+        malformedLineCount: Int,
+        indexedByteOffset: UInt64
+    ) {
+        self.totalSpendUSD = totalSpendUSD
+        self.lastActivityAt = lastActivityAt
+        self.attributions = attributions
+        self.malformedLineCount = malformedLineCount
+        self.indexedByteOffset = indexedByteOffset
+    }
+
+    public static let empty = GenerationLedgerSummary(
         totalSpendUSD: 0,
         lastActivityAt: nil,
         attributions: [:],

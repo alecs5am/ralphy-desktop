@@ -17,14 +17,12 @@ enum LibrarySourceQuery {
         to query: MediaQuery
     ) -> MediaQuery {
         var updated = query
-        updated.workspace = nil
-        updated.project = nil
         updated.verdict = nil
         updated.favoriteOnly = false
         updated.excludeRejected = false
 
         switch source {
-        case .all:
+        case .all, .workspace, .project:
             break
         case .usable:
             updated.excludeRejected = true
@@ -32,22 +30,11 @@ enum LibrarySourceQuery {
             updated.verdict = verdict
         case .favorites:
             updated.favoriteOnly = true
-        case let .workspace(workspace):
-            updated.workspace = workspace
-        case let .project(project):
-            updated.workspace = query.workspace
-            updated.project = project
         }
         return updated
     }
 
     static func selection(for query: MediaQuery) -> LibrarySmartSource {
-        if let project = query.project {
-            return .project(project)
-        }
-        if let workspace = query.workspace {
-            return .workspace(workspace)
-        }
         if query.favoriteOnly {
             return .favorites
         }
@@ -79,7 +66,6 @@ struct LibrarySourceCounts: Sendable {
         var allProjectCounts: [String: Int] = [:]
         var projectCountsByWorkspace: [String: [String: Int]] = [:]
         var favoriteCount = 0
-
         for item in items {
             let annotation = annotations[item.relativePath]
             verdictCounts[annotation?.verdict ?? .unreviewed, default: 0] += 1
@@ -88,7 +74,6 @@ struct LibrarySourceCounts: Sendable {
             allProjectCounts[item.project, default: 0] += 1
             projectCountsByWorkspace[item.workspace, default: [:]][item.project, default: 0] += 1
         }
-
         self.verdictCounts = verdictCounts
         self.workspaceCounts = workspaceCounts
         self.allProjectCounts = allProjectCounts
@@ -120,42 +105,57 @@ struct TrashProgress: Equatable, Sendable {
     let total: Int
 }
 
-private struct TrashFailure: Sendable {
+struct TrashFailure: Sendable {
     let filename: String
     let message: String
 }
 
-private struct TrashBatchResult: Sendable {
+struct TrashBatchResult: Sendable {
     let trashedIDs: Set<String>
     let failures: [TrashFailure]
 }
 
+typealias CatalogScanOperation = @Sendable (URL) async throws -> WorkspaceCatalogSnapshot
+typealias ProjectScanOperation = @Sendable (
+    ProjectReference,
+    URL,
+    ScanOptions,
+    [String: GenerationAttribution]
+) async throws -> ScanResult
+typealias LedgerLoadOperation = @Sendable (
+    ProjectReference,
+    URL
+) async -> GenerationLedgerSummary
 typealias MediaQueryEvaluator = @Sendable (
     MediaQuery,
     [MediaItem],
     [String: MediaAnnotation]
 ) -> [MediaSection]
-
 typealias TrashItemOperation = @Sendable (URL) throws -> Void
 typealias AnnotationSaveOperation = @Sendable (MetadataStore) async throws -> MetadataStore
 
 @MainActor
 final class LibraryViewModel: ObservableObject {
-    @Published private(set) var rootURL: URL?
+    @Published private(set) var catalog = WorkspaceCatalogSnapshot.empty
+    @Published private(set) var navigation = WorkbenchNavigation()
+    @Published var rootURL: URL?
     @Published private(set) var items: [MediaItem] = []
-    @Published private(set) var annotations: [String: MediaAnnotation] = [:]
+    @Published var annotations: [String: MediaAnnotation] = [:]
     @Published private(set) var visibleSections: [MediaSection] = []
-    @Published private(set) var visibleItems: [MediaItem] = []
+    @Published var visibleItems: [MediaItem] = []
     @Published private(set) var selectedIDs: Set<String> = []
-    @Published private(set) var sourceCounts = LibrarySourceCounts()
-    @Published private(set) var isScanning = false
-    @Published private(set) var scanDuration: TimeInterval?
-    @Published private(set) var statusText = "Open a .ralphy folder"
-    @Published private(set) var pendingTrashConfirmation: [MediaItem]?
-    @Published private(set) var trashProgress: TrashProgress?
-    @Published private(set) var isApplyingQuery = false
-    @Published private(set) var isTerminating = false
-    @Published private(set) var quickLookURL: URL?
+    @Published var sourceCounts = LibrarySourceCounts()
+    @Published private(set) var isLoadingCatalog = false
+    @Published private(set) var isLoadingProject = false
+    @Published private(set) var isLoadingCosts = false
+    @Published private(set) var projectSpendUSD: Double?
+    @Published var scanDuration: TimeInterval?
+    @Published var statusText = "Open a .ralphy folder"
+    @Published var pendingTrashConfirmation: [MediaItem]?
+    @Published var trashProgress: TrashProgress?
+    @Published var isApplyingQuery = false
+    @Published var isTerminating = false
+    @Published var quickLookURL: URL?
     @Published var errorMessage: String?
 
     @Published var query: MediaQuery {
@@ -163,8 +163,6 @@ final class LibraryViewModel: ObservableObject {
             appSettings.bucket = query.bucket
             appSettings.sort = query.sort
             appSettings.group = query.group
-            appSettings.workspace = query.workspace
-            appSettings.project = query.project
             appSettings.verdict = query.verdict
             appSettings.favoriteOnly = query.favoriteOnly
             appSettings.excludeRejected = query.excludeRejected
@@ -180,7 +178,7 @@ final class LibraryViewModel: ObservableObject {
         didSet {
             guard includeIntermediates != oldValue else { return }
             appSettings.includeIntermediates = includeIntermediates
-            requestScan()
+            requestSelectedProjectRefresh()
         }
     }
 
@@ -188,20 +186,28 @@ final class LibraryViewModel: ObservableObject {
         didSet { appSettings.inspectorVisible = inspectorVisible }
     }
 
-    private struct LibraryContext {
+    struct LibraryContext {
         let root: URL
         var annotations: [String: MediaAnnotation]
         var store: MetadataStore?
         let metadataWarning: String?
     }
 
-    private struct ScanRequest {
+    struct ProjectScanRequest {
         let generation: UInt64
-        let context: LibraryContext
+        let project: ProjectReference
+        let root: URL
         let options: ScanOptions
+        let attributions: [String: GenerationAttribution]
+        let startsLedgerHydration: Bool
     }
 
-    private struct QueryRequest {
+    struct ProjectRefreshTarget {
+        let project: ProjectReference
+        let root: URL
+    }
+
+    struct QueryRequest {
         let generation: UInt64
         let query: MediaQuery
         let items: [MediaItem]
@@ -209,41 +215,103 @@ final class LibraryViewModel: ObservableObject {
         let debounceSearch: Bool
     }
 
-    private struct AnnotationSaveRequest {
+    struct AnnotationSaveRequest {
         let generation: UInt64
         let store: MetadataStore
         let annotations: [String: MediaAnnotation]
     }
 
-    private enum AnnotationSaveOutcome {
+    enum AnnotationSaveOutcome {
         case saved
         case reloadRequired
         case retryableFailure
     }
 
-    private let appSettings: AppSettings
-    private let queryEvaluator: MediaQueryEvaluator
-    private let trashItem: TrashItemOperation
-    private let annotationSave: AnnotationSaveOperation
-    private var desiredContext: LibraryContext?
-    private var requestedScan: ScanRequest?
-    private var store: MetadataStore?
-    private var watcher: FolderWatcher?
-    private var scanGeneration: UInt64 = 0
-    private var queryGeneration: UInt64 = 0
-    private var rootLoadGeneration: UInt64 = 0
-    private var annotationSaveGeneration: UInt64 = 0
-    private var selectionAnchorID: String?
-    private var primarySelectionID: String?
-    private var queryTask: Task<Void, Never>?
-    private var pendingQueryRequest: QueryRequest?
-    private var queryComputationInFlight = false
-    private var trashTask: Task<Void, Never>?
-    private var metadataSaveTasks: [URL: Task<Void, Never>] = [:]
-    private var pendingAnnotationSaves: [URL: AnnotationSaveRequest] = [:]
+    let appSettings: AppSettings
+    let catalogScan: CatalogScanOperation
+    let projectScan: ProjectScanOperation
+    let ledgerLoad: LedgerLoadOperation
+    let queryEvaluator: MediaQueryEvaluator
+    let trashItem: TrashItemOperation
+    let annotationSave: AnnotationSaveOperation
 
-    private lazy var reloadCoalescer = ReloadCoalescer(delay: .milliseconds(450)) { [weak self] in
-        await self?.performRequestedScan()
+    var desiredContext: LibraryContext?
+    var store: MetadataStore?
+    var watcher: FolderWatcher?
+    var catalogGeneration: UInt64 = 0
+    var projectGeneration: UInt64 = 0
+    var ledgerGeneration: UInt64 = 0
+    var queryGeneration: UInt64 = 0
+    var rootLoadGeneration: UInt64 = 0
+    var annotationSaveGeneration: UInt64 = 0
+    var selectionAnchorID: String?
+    var primarySelectionID: String?
+    var currentScrollAnchorID: String?
+    var currentAttributions: [String: GenerationAttribution] = [:]
+    var catalogTask: Task<Void, Never>?
+    var projectTask: Task<Void, Never>?
+    var ledgerTask: Task<Void, Never>?
+    var queryTask: Task<Void, Never>?
+    var pendingProjectRequest: ProjectScanRequest?
+    var pendingProjectRefreshTarget: ProjectRefreshTarget?
+    var activeProjectGeneration: UInt64?
+    var projectComputationInFlight = false
+    var pendingQueryRequest: QueryRequest?
+    var queryComputationInFlight = false
+    var trashTask: Task<Void, Never>?
+    var metadataSaveTasks: [URL: Task<Void, Never>] = [:]
+    var pendingAnnotationSaves: [URL: AnnotationSaveRequest] = [:]
+
+    var catalogState: WorkspaceCatalogSnapshot {
+        get { catalog }
+        set { catalog = newValue }
+    }
+
+    var navigationState: WorkbenchNavigation {
+        get { navigation }
+        set { navigation = newValue }
+    }
+
+    var projectItemsState: [MediaItem] {
+        get { items }
+        set { items = newValue }
+    }
+
+    var selectionState: Set<String> {
+        get { selectedIDs }
+        set { selectedIDs = newValue }
+    }
+
+    var catalogLoadingState: Bool {
+        get { isLoadingCatalog }
+        set { isLoadingCatalog = newValue }
+    }
+
+    var projectLoadingState: Bool {
+        get { isLoadingProject }
+        set { isLoadingProject = newValue }
+    }
+
+    var costsLoadingState: Bool {
+        get { isLoadingCosts }
+        set { isLoadingCosts = newValue }
+    }
+
+    var spendState: Double? {
+        get { projectSpendUSD }
+        set { projectSpendUSD = newValue }
+    }
+
+    lazy var catalogReloadCoalescer = ReloadCoalescer(
+        delay: .milliseconds(450)
+    ) { [weak self] in
+        await self?.refreshCatalog()
+    }
+
+    lazy var projectReloadCoalescer = ReloadCoalescer(
+        delay: .milliseconds(450)
+    ) { [weak self] in
+        await self?.refreshRequestedProject()
     }
 
     init(
@@ -251,6 +319,18 @@ final class LibraryViewModel: ObservableObject {
         queryEvaluator: @escaping MediaQueryEvaluator = { query, items, annotations in
             query.sections(from: items, annotations: annotations)
         },
+        catalogScan: @escaping CatalogScanOperation = { root in
+            try WorkspaceCatalogScanner().scan(root: root)
+        },
+        projectScan: @escaping ProjectScanOperation = { project, root, options, attributions in
+            try MediaScanner().scan(
+                project: project,
+                root: root,
+                options: options,
+                attributions: attributions
+            )
+        },
+        ledgerLoad: LedgerLoadOperation? = nil,
         trashItem: @escaping TrashItemOperation = { url in
             var resultingURL: NSURL?
             try FileManager.default.trashItem(at: url, resultingItemURL: &resultingURL)
@@ -259,7 +339,15 @@ final class LibraryViewModel: ObservableObject {
     ) {
         appSettings = settings
         self.queryEvaluator = queryEvaluator
+        self.catalogScan = catalogScan
+        self.projectScan = projectScan
         self.trashItem = trashItem
+        self.ledgerLoad = ledgerLoad ?? { project, root in
+            let index = GenerationLedgerIndex(
+                cacheDirectory: root.appending(path: "media-library/cache")
+            )
+            return await index.summary(for: project, root: root)
+        }
         if let annotationSave {
             self.annotationSave = annotationSave
         } else {
@@ -273,8 +361,7 @@ final class LibraryViewModel: ObservableObject {
             verdict: settings.verdict,
             excludeRejected: settings.excludeRejected,
             favoriteOnly: settings.favoriteOnly,
-            workspace: settings.workspace,
-            project: settings.project,
+            mode: settings.projectMode,
             bucket: settings.bucket,
             sort: settings.sort,
             group: settings.group
@@ -285,12 +372,55 @@ final class LibraryViewModel: ObservableObject {
         requestVisibleItemsUpdate()
     }
 
+    var route: WorkbenchRoute {
+        navigation.route
+    }
+
+    var selectedProjectReference: ProjectReference? {
+        switch route {
+        case let .project(project), let .asset(project, _):
+            project
+        case .library, .workspace:
+            nil
+        }
+    }
+
+    var selectedWorkspaceID: String? {
+        switch route {
+        case let .workspace(id):
+            id
+        case let .project(project), let .asset(project, _):
+            project.workspaceID
+        case .library:
+            nil
+        }
+    }
+
+    var workspaceSummaries: [WorkspaceSummary] {
+        catalog.workspaces
+    }
+
+    var projectSummaries: [ProjectSummary] {
+        selectedWorkspaceID.map(catalog.projects(in:)) ?? []
+    }
+
+    var workspaces: [(String, Int)] {
+        catalog.workspaces.map { ($0.id, $0.projectCount) }
+    }
+
+    var projects: [(String, Int)] {
+        projectSummaries.map { summary in
+            let count = summary.id == selectedProjectReference ? items.count : 0
+            return (summary.id.projectID, count)
+        }
+    }
+
     var filteredItems: [MediaItem] {
         visibleItems
     }
 
     var selectedItems: [MediaItem] {
-        return visibleItems.filter { selectedIDs.contains($0.id) }
+        visibleItems.filter { selectedIDs.contains($0.id) }
     }
 
     var primarySelection: MediaItem? {
@@ -307,12 +437,8 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    var workspaces: [(String, Int)] {
-        sourceCounts.workspaces
-    }
-
-    var projects: [(String, Int)] {
-        sourceCounts.projects(in: query.workspace)
+    var scrollAnchorID: String? {
+        currentScrollAnchorID
     }
 
     var searchText: String {
@@ -321,13 +447,29 @@ final class LibraryViewModel: ObservableObject {
     }
 
     var selectedWorkspace: String? {
-        get { query.workspace }
-        set { updateQuery { $0.workspace = newValue } }
+        get { selectedWorkspaceID }
+        set {
+            if let newValue {
+                enterWorkspace(newValue)
+            } else {
+                returnToLibrary()
+            }
+        }
     }
 
     var selectedProject: String? {
-        get { query.project }
-        set { updateQuery { $0.project = newValue } }
+        get { selectedProjectReference?.projectID }
+        set {
+            guard let workspaceID = selectedWorkspaceID else { return }
+            if let newValue,
+               let summary = catalog.projects(in: workspaceID).first(
+                where: { $0.id.projectID == newValue }
+               ) {
+                enterProject(summary.id)
+            } else {
+                enterWorkspace(workspaceID)
+            }
+        }
     }
 
     var selectedBucket: MediaBucket? {
@@ -354,6 +496,10 @@ final class LibraryViewModel: ObservableObject {
         sourceCounts.favoriteCount
     }
 
+    var isScanning: Bool {
+        isLoadingCatalog || isLoadingProject
+    }
+
     var isTrashing: Bool {
         trashProgress != nil
     }
@@ -366,129 +512,137 @@ final class LibraryViewModel: ObservableObject {
         hasPendingAnnotationSaves || isTrashing
     }
 
-    func beginTermination() {
-        isTerminating = true
-        rootLoadGeneration &+= 1
+    var selectedSource: LibrarySmartSource {
+        switch route {
+        case let .workspace(id):
+            .workspace(id)
+        case let .project(project), let .asset(project, _):
+            .project(project.projectID)
+        case .library:
+            LibrarySourceQuery.selection(for: query)
+        }
     }
 
-    func cancelTermination() {
-        isTerminating = false
+    func applySource(_ source: LibrarySmartSource) {
+        switch source {
+        case let .workspace(id):
+            enterWorkspace(id)
+        case let .project(projectID):
+            selectedProject = projectID
+        default:
+            query = LibrarySourceQuery.applying(source, to: query)
+        }
     }
 
     func count(for verdict: ReviewVerdict) -> Int {
         sourceCounts.count(for: verdict)
     }
 
-    var selectedSource: LibrarySmartSource {
-        LibrarySourceQuery.selection(for: query)
+    func enterWorkspace(_ id: String) {
+        guard catalog.workspaces.contains(where: { $0.id == id }) else { return }
+        invalidateProjectLoads()
+        var updatedNavigation = navigation
+        updatedNavigation.enterWorkspace(id)
+        navigation = updatedNavigation
+        appSettings.selectedWorkspaceID = id
+        appSettings.selectedProjectID = nil
+        clearProjectSurface()
     }
 
-    func applySource(_ source: LibrarySmartSource) {
-        query = LibrarySourceQuery.applying(source, to: query)
+    func enterProject(_ project: ProjectReference) {
+        guard let root = rootURL,
+              catalog.projects(in: project.workspaceID).contains(where: { $0.id == project }) else {
+            return
+        }
+        invalidateProjectLoads()
+        var updatedNavigation = navigation
+        updatedNavigation.enterProject(project)
+        navigation = updatedNavigation
+        appSettings.selectedWorkspaceID = project.workspaceID
+        appSettings.selectedProjectID = project.projectID
+
+        var projectQuery = query
+        projectQuery.workspace = project.workspaceID
+        projectQuery.project = project.projectID
+        projectQuery.mode = appSettings.projectMode
+        query = projectQuery
+        clearProjectSurface()
+        isLoadingProject = true
+        statusText = "Loading \(project.projectID)..."
+        enqueueProjectScan(
+            project: project,
+            root: root,
+            attributions: [:],
+            startsLedgerHydration: true
+        )
     }
 
-    func restoreLastLibrary() {
-        guard rootURL == nil, let root = appSettings.lastRoot else { return }
-        load(root: root)
+    func openAsset(_ item: MediaItem) {
+        guard let project = selectedProjectReference,
+              item.workspace == project.workspaceID,
+              item.project == project.projectID,
+              visibleItems.contains(where: { $0.id == item.id }) else {
+            return
+        }
+        let state = ProjectPresentationState(
+            mode: query.mode,
+            query: query,
+            selectedIDs: selectedIDs,
+            scrollAnchorID: currentScrollAnchorID
+        )
+        var updatedNavigation = navigation
+        updatedNavigation.setPresentationState(state, for: project)
+        if case .asset = updatedNavigation.route {
+            updatedNavigation.closeAsset()
+        }
+        updatedNavigation.openAsset(id: item.id)
+        navigation = updatedNavigation
+        selectedIDs = [item.id]
+        primarySelectionID = item.id
+        selectionAnchorID = item.id
     }
 
-    func pickLibrary() {
-        guard !isTerminating else {
-            if isTrashing {
-                errorMessage = "Wait for the Trash operation to finish before changing libraries."
+    func goBack() {
+        switch route {
+        case let .asset(project, _):
+            guard let state = navigation.presentationState(for: project) else {
+                var updatedNavigation = navigation
+                updatedNavigation.goBack()
+                navigation = updatedNavigation
+                return
             }
-            return
-        }
-        guard !isTrashing else {
-            errorMessage = "Wait for the Trash operation to finish before changing libraries."
-            return
-        }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.showsHiddenFiles = true
-        panel.prompt = "Open .ralphy"
-        panel.directoryURL = appSettings.lastRoot?.deletingLastPathComponent()
-        if panel.runModal() == .OK, let url = panel.url {
-            load(root: url)
+            query = state.query
+            selectedIDs = state.selectedIDs.intersection(Set(items.map(\.id)))
+            primarySelectionID = firstSelectedID()
+            selectionAnchorID = primarySelectionID
+            currentScrollAnchorID = state.scrollAnchorID
+            var updatedNavigation = navigation
+            updatedNavigation.goBack()
+            navigation = updatedNavigation
+        case let .project(project):
+            enterWorkspace(project.workspaceID)
+        case .workspace:
+            returnToLibrary()
+        case .library:
+            break
         }
     }
 
-    func load(root: URL) {
-        guard !isTerminating else {
-            if isTrashing {
-                errorMessage = "Wait for the Trash operation to finish before changing libraries."
-            }
-            return
-        }
-        guard !isTrashing else {
-            errorMessage = "Wait for the Trash operation to finish before changing libraries."
-            return
-        }
-        let root = root.standardizedFileURL
-        var isDirectory: ObjCBool = false
-        let workspaces = root.appending(path: "workspaces")
-        guard root.lastPathComponent == ".ralphy",
-              FileManager.default.fileExists(atPath: workspaces.path, isDirectory: &isDirectory),
-              isDirectory.boolValue else {
-            errorMessage = "Choose a .ralphy folder that contains a workspaces directory."
-            return
-        }
-
-        rootLoadGeneration &+= 1
-        let generation = rootLoadGeneration
-        if pendingAnnotationSaves[root] != nil {
-            Task { [weak self] in
-                guard let self else { return }
-                let outcome = await self.flushPendingAnnotationSave(for: root)
-                guard generation == self.rootLoadGeneration,
-                      !self.isTrashing,
-                      !self.isTerminating else { return }
-                switch outcome {
-                case .saved:
-                    self.openValidatedRoot(root, generation: generation)
-                case .reloadRequired:
-                    self.cancelPendingSave(for: root)
-                    self.openValidatedRoot(root, generation: generation)
-                case .retryableFailure:
-                    break
-                }
-            }
-            return
-        }
-        openValidatedRoot(root, generation: generation)
+    func showPreviousAsset() {
+        moveAsset(by: -1)
     }
 
-    private func openValidatedRoot(_ root: URL, generation: UInt64) {
-        guard generation == rootLoadGeneration,
-              !isTrashing,
-              !isTerminating else { return }
-        let context: LibraryContext
-        do {
-            let metadata = try MetadataStore(root: root)
-            context = LibraryContext(
-                root: root,
-                annotations: metadata.annotations,
-                store: metadata,
-                metadataWarning: nil
-            )
-            errorMessage = nil
-        } catch {
-            let warning = "Could not read \(root.appending(path: "media-library/library.json").path). " +
-                "Media will remain visible, but annotation changes will not be saved: \(error.localizedDescription)"
-            context = LibraryContext(
-                root: root,
-                annotations: [:],
-                store: nil,
-                metadataWarning: warning
-            )
-            errorMessage = warning
-        }
+    func showNextAsset() {
+        moveAsset(by: 1)
+    }
 
-        desiredContext = context
-        startWatching(root: root)
-        requestScan()
+    func updateScrollAnchor(_ id: String?) {
+        currentScrollAnchorID = id
+    }
+
+    func setProjectMode(_ mode: ProjectMode) {
+        appSettings.projectMode = mode
+        updateQuery { $0.mode = mode }
     }
 
     func select(
@@ -515,7 +669,6 @@ final class LibraryViewModel: ObservableObject {
             selectedIDs = [item.id]
             selectionAnchorID = item.id
         }
-
         primarySelectionID = selectedIDs.contains(item.id) ? item.id : firstSelectedID()
     }
 
@@ -540,394 +693,13 @@ final class LibraryViewModel: ObservableObject {
         select(visibleItems[index], shift: extending)
     }
 
-    func annotation(for item: MediaItem) -> MediaAnnotation {
-        annotations[item.relativePath] ?? MediaAnnotation()
-    }
-
-    func updateAnnotation(
-        for item: MediaItem,
-        _ edit: (inout MediaAnnotation) -> Void
-    ) {
-        mutateAnnotations(for: [item], edit)
-    }
-
-    func setVerdict(_ verdict: ReviewVerdict) {
-        mutateAnnotations(for: selectedItems) { $0.verdict = verdict }
-    }
-
-    func setRating(_ rating: Int) {
-        mutateAnnotations(for: selectedItems) { $0.rating = rating }
-    }
-
-    func setFavorite(_ favorite: Bool) {
-        mutateAnnotations(for: selectedItems) { $0.favorite = favorite }
-    }
-
-    func toggleFavorite() {
-        let selected = selectedItems
-        let allFavorites = !selected.isEmpty && selected.allSatisfy { annotation(for: $0).favorite }
-        mutateAnnotations(for: selected) { $0.favorite = !allFavorites }
-    }
-
-    func addTags(_ tags: [String]) {
-        mutateAnnotations(for: selectedItems) { $0.tags += tags }
-    }
-
-    func removeTags(_ tags: [String]) {
-        let removed = Set(tags.map {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        })
-        mutateAnnotations(for: selectedItems) {
-            $0.tags.removeAll { removed.contains($0.lowercased()) }
-        }
-    }
-
-    func setNote(_ note: String) {
-        mutateAnnotations(for: selectedItems) { $0.note = note }
-    }
-
-    func showQuickLook() {
-        quickLookURL = primarySelection?.url
-    }
-
-    func clearQuickLook() {
-        quickLookURL = nil
-    }
-
-    func copyPaths() {
-        let text = selectedItems.map(\.url.path).joined(separator: "\n")
-        guard !text.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-    }
-
-    func copyForAgent() {
-        let selected = selectedItems
-        guard !selected.isEmpty else { return }
-        let text = AgentFeedback.render(items: selected, annotations: annotations)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-    }
-
-    func openSelection() {
-        for item in selectedItems {
-            NSWorkspace.shared.open(item.url)
-        }
-    }
-
-    func revealSelectionInFinder() {
-        let urls = selectedItems.map(\.url)
-        guard !urls.isEmpty else { return }
-        NSWorkspace.shared.activateFileViewerSelecting(urls)
-    }
-
-    func requestTrash() {
-        guard !isTerminating, !isApplyingQuery, !isTrashing else { return }
-        let selected = selectedItems
-        guard !selected.isEmpty else { return }
-        pendingTrashConfirmation = selected
-    }
-
-    func confirmTrash() {
-        guard !isTerminating,
-              !isTrashing,
-              let pending = pendingTrashConfirmation,
-              !pending.isEmpty else { return }
-        rootLoadGeneration &+= 1
-        pendingTrashConfirmation = nil
-        trashProgress = TrashProgress(completed: 0, total: pending.count)
-        let trashItem = self.trashItem
-
-        trashTask = Task { [weak self] in
-            let result = await Task.detached(priority: .userInitiated) {
-                var trashedIDs = Set<String>()
-                var failures: [TrashFailure] = []
-
-                for (index, item) in pending.enumerated() {
-                    do {
-                        try trashItem(item.url)
-                        trashedIDs.insert(item.id)
-                    } catch {
-                        failures.append(
-                            TrashFailure(
-                                filename: item.filename,
-                                message: error.localizedDescription
-                            )
-                        )
-                    }
-                    await self?.updateTrashProgress(
-                        completed: index + 1,
-                        total: pending.count
-                    )
-                }
-                return TrashBatchResult(
-                    trashedIDs: trashedIDs,
-                    failures: failures
-                )
-            }.value
-            self?.finishTrash(result)
-        }
-    }
-
-    func cancelTrash() {
-        pendingTrashConfirmation = nil
-    }
-
-    func moveSelectionToTrash() {
-        requestTrash()
-    }
-
-    private func updateTrashProgress(completed: Int, total: Int) {
-        guard isTrashing else { return }
-        trashProgress = TrashProgress(completed: completed, total: total)
-    }
-
-    private func finishTrash(_ result: TrashBatchResult) {
-        trashProgress = nil
-        trashTask = nil
-
-        if !result.trashedIDs.isEmpty {
-            items.removeAll { result.trashedIDs.contains($0.id) }
-            selectedIDs.subtract(result.trashedIDs)
-            updateSourceCounts()
-            requestVisibleItemsUpdate()
-            requestScan()
-        }
-        if !result.failures.isEmpty {
-            let failures = result.failures.map { "\($0.filename): \($0.message)" }
-            errorMessage = "Could not move files to Trash:\n" + failures.joined(separator: "\n")
-        }
-    }
-
-    private func updateQuery(_ edit: (inout MediaQuery) -> Void) {
+    func updateQuery(_ edit: (inout MediaQuery) -> Void) {
         var updated = query
         edit(&updated)
         query = updated
     }
 
-    private func mutateAnnotations(
-        for targets: [MediaItem],
-        _ edit: (inout MediaAnnotation) -> Void
-    ) {
-        guard !isTerminating, !targets.isEmpty else { return }
-        let updatedAt = Date()
-        var updatedAnnotations = annotations
-        var verdictChanged = false
-        var favoriteChanged = false
-        var searchMetadataChanged = false
-
-        for item in targets {
-            var annotation = annotation(for: item)
-            let previous = annotation
-            edit(&annotation)
-            annotation.updatedAt = updatedAt
-            updatedAnnotations[item.relativePath] = annotation
-            verdictChanged = verdictChanged || previous.verdict != annotation.verdict
-            favoriteChanged = favoriteChanged || previous.favorite != annotation.favorite
-            searchMetadataChanged = searchMetadataChanged
-                || previous.tags != annotation.tags
-                || previous.note != annotation.note
-        }
-        annotations = updatedAnnotations
-        if desiredContext?.root == rootURL {
-            desiredContext?.annotations = annotations
-        }
-        if verdictChanged || favoriteChanged {
-            updateSourceCounts()
-        }
-        let searchActive = !(query.search?.isEmpty ?? true)
-        if verdictChanged && (query.verdict != nil || query.excludeRejected)
-            || favoriteChanged && query.favoriteOnly
-            || searchMetadataChanged && searchActive {
-            requestVisibleItemsUpdate()
-        }
-        saveAnnotations()
-    }
-
-    private func saveAnnotations() {
-        guard let store else {
-            if let warning = desiredContext?.metadataWarning {
-                errorMessage = warning
-            }
-            return
-        }
-
-        annotationSaveGeneration &+= 1
-        let root = store.root
-        let request = AnnotationSaveRequest(
-            generation: annotationSaveGeneration,
-            store: store,
-            annotations: annotations
-        )
-        pendingAnnotationSaves[root] = request
-        metadataSaveTasks[root]?.cancel()
-        metadataSaveTasks[root] = Task { [weak self] in
-            do {
-                try await Task.sleep(for: .milliseconds(350))
-                try Task.checkCancellation()
-            } catch {
-                return
-            }
-            _ = await self?.persistAnnotationSave(request)
-        }
-    }
-
-    @discardableResult
-    func flushPendingAnnotationSaves() async -> Bool {
-        while let request = pendingAnnotationSaves.values.min(
-            by: { $0.generation < $1.generation }
-        ) {
-            guard case .saved = await flushPendingAnnotationSave(
-                for: request.store.root
-            ) else {
-                return false
-            }
-        }
-        return true
-    }
-
-    func completePendingTerminationWork() async -> Bool {
-        while true {
-            if let trashTask {
-                await trashTask.value
-                continue
-            }
-            if hasPendingAnnotationSaves {
-                guard await flushPendingAnnotationSaves() else { return false }
-                continue
-            }
-            return true
-        }
-    }
-
-    private func flushPendingAnnotationSave(
-        for root: URL
-    ) async -> AnnotationSaveOutcome {
-        while let request = pendingAnnotationSaves[root] {
-            metadataSaveTasks[root]?.cancel()
-            let outcome = await persistAnnotationSave(request)
-            guard case .saved = outcome else { return outcome }
-        }
-        return .saved
-    }
-
-    private func persistAnnotationSave(
-        _ request: AnnotationSaveRequest
-    ) async -> AnnotationSaveOutcome {
-        var updatedStore = request.store
-        updatedStore.annotations = request.annotations
-
-        do {
-            let savedStore = try await annotationSave(updatedStore)
-            let root = request.store.root
-            guard pendingAnnotationSaves[root]?.generation == request.generation else {
-                return .saved
-            }
-            pendingAnnotationSaves[root] = nil
-            metadataSaveTasks[root] = nil
-            metadataSaveCompleted(savedStore)
-            return .saved
-        } catch let error as MetadataStoreError {
-            errorMessage = "Annotations were not saved. \(error.localizedDescription)"
-            switch error {
-            case .conflict, .corruptFile, .unsupportedFutureSchema:
-                return .reloadRequired
-            }
-        } catch {
-            errorMessage = "Annotations were not saved. \(error.localizedDescription)"
-        }
-        return .retryableFailure
-    }
-
-    private func cancelPendingSave(for root: URL) {
-        metadataSaveTasks[root]?.cancel()
-        metadataSaveTasks[root] = nil
-        pendingAnnotationSaves[root] = nil
-    }
-
-    private func requestScan() {
-        guard let context = desiredContext else { return }
-        scanGeneration &+= 1
-        requestedScan = ScanRequest(
-            generation: scanGeneration,
-            context: context,
-            options: ScanOptions(includeIntermediates: includeIntermediates)
-        )
-        isScanning = true
-        statusText = "Scanning \(context.root.path)..."
-        Task {
-            await reloadCoalescer.request()
-        }
-    }
-
-    private func performRequestedScan() async {
-        guard let request = requestedScan else { return }
-        let startedAt = Date()
-        if request.generation == scanGeneration {
-            isScanning = true
-            statusText = "Scanning \(request.context.root.path)..."
-        }
-
-        do {
-            let result = try await Task.detached(priority: .userInitiated) {
-                try MediaScanner().scan(root: request.context.root, options: request.options)
-            }.value
-            let duration = Date().timeIntervalSince(startedAt)
-
-            guard request.generation == scanGeneration,
-                  let latestContext = desiredContext,
-                  latestContext.root == request.context.root else { return }
-            rootURL = latestContext.root
-            items = result.items
-            annotations = latestContext.annotations
-            updateSourceCounts()
-            store = latestContext.store
-            selectedIDs.formIntersection(Set(items.map(\.id)))
-            if primarySelectionID.map(selectedIDs.contains) != true {
-                primarySelectionID = firstSelectedID()
-            }
-            if selectionAnchorID.map({ anchorID in items.contains(where: { $0.id == anchorID }) }) == false {
-                selectionAnchorID = primarySelectionID
-            }
-            scanDuration = duration
-            isScanning = false
-            statusText = scanStatus(
-                count: result.items.count,
-                skipped: result.skipped,
-                duration: duration
-            )
-            appSettings.lastRoot = latestContext.root
-            if let warning = latestContext.metadataWarning {
-                errorMessage = warning
-            }
-            requestVisibleItemsUpdate()
-        } catch {
-            guard request.generation == scanGeneration else { return }
-            scanDuration = Date().timeIntervalSince(startedAt)
-            isScanning = false
-            statusText = "Scan failed. Showing the last successful library."
-            errorMessage = "Could not scan \(request.context.root.path): \(error.localizedDescription)"
-        }
-    }
-
-    private func startWatching(root: URL) {
-        watcher?.stop()
-        watcher = FolderWatcher(root: root) { [weak self] _ in
-            guard self?.desiredContext?.root == root else { return }
-            self?.requestScan()
-        }
-        watcher?.start()
-    }
-
-    private func metadataSaveCompleted(_ savedStore: MetadataStore) {
-        guard rootURL == savedStore.root else { return }
-        store = savedStore
-        if desiredContext?.root == savedStore.root {
-            desiredContext?.store = savedStore
-        }
-    }
-
-    private func requestVisibleItemsUpdate(debounceSearch: Bool = false) {
+    func requestVisibleItemsUpdate(debounceSearch: Bool = false) {
         queryGeneration &+= 1
         pendingQueryRequest = QueryRequest(
             generation: queryGeneration,
@@ -938,6 +710,14 @@ final class LibraryViewModel: ObservableObject {
         )
         isApplyingQuery = true
         scheduleNextQuery()
+    }
+
+    func updateSourceCounts() {
+        sourceCounts = LibrarySourceCounts(items: items, annotations: annotations)
+    }
+
+    func firstSelectedID() -> String? {
+        visibleItems.first(where: { selectedIDs.contains($0.id) })?.id
     }
 
     private func scheduleNextQuery() {
@@ -966,56 +746,73 @@ final class LibraryViewModel: ObservableObject {
         queryTask = nil
         queryComputationInFlight = true
         let evaluator = queryEvaluator
-
         let sections = await Task.detached(priority: .userInitiated) {
             evaluator(request.query, request.items, request.annotations)
         }.value
         queryComputationInFlight = false
 
         if request.generation == queryGeneration {
-            acceptVisibleSections(sections, generation: request.generation)
+            visibleSections = sections
+            visibleItems = sections.flatMap(\.items)
+            let visibleIDs = Set(visibleItems.map(\.id))
+            selectedIDs.formIntersection(visibleIDs)
+            if primarySelectionID.map(selectedIDs.contains) != true {
+                primarySelectionID = firstSelectedID()
+            }
+            if selectionAnchorID.map(visibleIDs.contains) != true {
+                selectionAnchorID = primarySelectionID
+            }
+            isApplyingQuery = false
         }
         if pendingQueryRequest != nil {
             scheduleNextQuery()
         }
     }
 
-    private func acceptVisibleSections(
-        _ sections: [MediaSection],
-        generation: UInt64
-    ) {
-        guard generation == queryGeneration else { return }
-        visibleSections = sections
-        visibleItems = sections.flatMap(\.items)
-        let visibleIDs = Set(visibleItems.map(\.id))
-        selectedIDs.formIntersection(visibleIDs)
-        if primarySelectionID.map(selectedIDs.contains) != true {
-            primarySelectionID = firstSelectedID()
+    private func moveAsset(by offset: Int) {
+        guard case let .asset(project, id) = route,
+              let index = visibleItems.firstIndex(where: { $0.id == id }) else {
+            return
         }
-        if selectionAnchorID.map(visibleIDs.contains) != true {
-            selectionAnchorID = primarySelectionID
+        let target = index + offset
+        guard visibleItems.indices.contains(target) else { return }
+        let item = visibleItems[target]
+        var updatedNavigation = navigation
+        updatedNavigation.closeAsset()
+        updatedNavigation.openAsset(id: item.id)
+        navigation = updatedNavigation
+        selectedIDs = [item.id]
+        primarySelectionID = item.id
+        selectionAnchorID = item.id
+        assert(item.workspace == project.workspaceID && item.project == project.projectID)
+    }
+
+    private func returnToLibrary() {
+        invalidateProjectLoads()
+        var updatedNavigation = navigation
+        while updatedNavigation.route != .library {
+            updatedNavigation.goBack()
         }
-        isApplyingQuery = false
+        navigation = updatedNavigation
+        appSettings.selectedWorkspaceID = nil
+        appSettings.selectedProjectID = nil
+        clearProjectSurface()
     }
 
-    private func updateSourceCounts() {
-        sourceCounts = LibrarySourceCounts(
-            items: items,
-            annotations: annotations
-        )
-    }
-
-    private func firstSelectedID() -> String? {
-        visibleItems.first(where: { selectedIDs.contains($0.id) })?.id
-    }
-
-    private func scanStatus(
-        count: Int,
-        skipped: Int,
-        duration: TimeInterval
-    ) -> String {
-        let timing = duration.formatted(.number.precision(.fractionLength(2)))
-        let skippedText = skipped == 0 ? "" : " (\(skipped) skipped)"
-        return "Indexed \(count) files\(skippedText) in \(timing)s"
+    func clearProjectSurface() {
+        items = []
+        visibleSections = []
+        visibleItems = []
+        selectedIDs = []
+        primarySelectionID = nil
+        selectionAnchorID = nil
+        currentScrollAnchorID = nil
+        currentAttributions = [:]
+        projectSpendUSD = nil
+        isLoadingProject = false
+        isLoadingCosts = false
+        scanDuration = nil
+        updateSourceCounts()
+        requestVisibleItemsUpdate()
     }
 }

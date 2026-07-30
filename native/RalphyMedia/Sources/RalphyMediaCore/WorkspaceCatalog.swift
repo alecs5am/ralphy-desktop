@@ -27,6 +27,22 @@ public struct WorkspaceCatalogSnapshot: Sendable {
     public let projectsByWorkspace: [String: [ProjectSummary]]
     public let warnings: [String]
 
+    public init(
+        workspaces: [WorkspaceSummary],
+        projectsByWorkspace: [String: [ProjectSummary]],
+        warnings: [String]
+    ) {
+        self.workspaces = workspaces
+        self.projectsByWorkspace = projectsByWorkspace
+        self.warnings = warnings
+    }
+
+    public static let empty = WorkspaceCatalogSnapshot(
+        workspaces: [],
+        projectsByWorkspace: [:],
+        warnings: []
+    )
+
     public func projects(in workspaceID: String) -> [ProjectSummary] {
         projectsByWorkspace[workspaceID] ?? []
     }
