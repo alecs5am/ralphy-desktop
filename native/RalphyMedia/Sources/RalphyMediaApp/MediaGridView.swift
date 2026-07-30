@@ -222,6 +222,7 @@ struct MediaGridView: View {
             selectForBatchAction(item)
             viewModel.requestTrash()
         }
+        .disabled(viewModel.isApplyingQuery || viewModel.isTrashing)
     }
 
     private func selectForBatchAction(_ item: MediaItem) {
@@ -283,7 +284,15 @@ struct LibraryStatusStrip: View {
             Text("\(viewModel.items.count) total")
             Text("\(viewModel.selectedIDs.count) selected")
             Spacer(minLength: 12)
-            if viewModel.isScanning {
+            if let progress = viewModel.trashProgress {
+                ProgressView(
+                    value: Double(progress.completed),
+                    total: Double(progress.total)
+                )
+                .frame(width: 72)
+                .accessibilityLabel("Moving files to Trash")
+                Text("Trash \(progress.completed)/\(progress.total)")
+            } else if viewModel.isScanning {
                 ProgressView()
                     .controlSize(.mini)
                     .accessibilityLabel("Scanning")

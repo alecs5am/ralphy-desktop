@@ -8,6 +8,11 @@ struct AppSettings {
         static let bucket = "mediaBucket"
         static let sort = "mediaSort"
         static let group = "mediaGroup"
+        static let workspace = "mediaWorkspace"
+        static let project = "mediaProject"
+        static let verdict = "mediaVerdict"
+        static let favoriteOnly = "mediaFavoriteOnly"
+        static let excludeRejected = "mediaExcludeRejected"
         static let includeIntermediates = "includeMediaIntermediates"
         static let inspectorVisible = "mediaInspectorVisible"
     }
@@ -64,6 +69,35 @@ struct AppSettings {
         nonmutating set {
             defaults.set(newValue.rawValue, forKey: Key.group)
         }
+    }
+
+    var workspace: String? {
+        get { defaults.string(forKey: Key.workspace) }
+        nonmutating set { defaults.set(newValue, forKey: Key.workspace) }
+    }
+
+    var project: String? {
+        get { defaults.string(forKey: Key.project) }
+        nonmutating set { defaults.set(newValue, forKey: Key.project) }
+    }
+
+    var verdict: ReviewVerdict? {
+        get {
+            defaults.string(forKey: Key.verdict).flatMap(ReviewVerdict.init(rawValue:))
+        }
+        nonmutating set {
+            defaults.set(newValue?.rawValue, forKey: Key.verdict)
+        }
+    }
+
+    var favoriteOnly: Bool {
+        get { defaults.bool(forKey: Key.favoriteOnly) }
+        nonmutating set { defaults.set(newValue, forKey: Key.favoriteOnly) }
+    }
+
+    var excludeRejected: Bool {
+        get { defaults.bool(forKey: Key.excludeRejected) }
+        nonmutating set { defaults.set(newValue, forKey: Key.excludeRejected) }
     }
 
     var includeIntermediates: Bool {

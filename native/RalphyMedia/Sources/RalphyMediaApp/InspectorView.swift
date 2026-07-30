@@ -197,6 +197,7 @@ struct InspectorView: View {
                 viewModel.requestTrash()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .disabled(viewModel.isApplyingQuery || viewModel.isTrashing)
         }
     }
 

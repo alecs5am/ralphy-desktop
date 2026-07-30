@@ -2,8 +2,40 @@ import Foundation
 import RalphyMediaCore
 import SwiftUI
 
+@MainActor
+final class RalphyMediaApplicationDelegate: NSObject, NSApplicationDelegate {
+    private weak var viewModel: LibraryViewModel?
+    private var terminationReplyPending = false
+
+    func attach(viewModel: LibraryViewModel) {
+        self.viewModel = viewModel
+    }
+
+    func applicationShouldTerminate(
+        _ sender: NSApplication
+    ) -> NSApplication.TerminateReply {
+        if terminationReplyPending {
+            return .terminateLater
+        }
+        guard let viewModel,
+              viewModel.hasPendingAnnotationSaves else {
+            return .terminateNow
+        }
+
+        terminationReplyPending = true
+        Task { [weak self] in
+            let saved = await viewModel.flushPendingAnnotationSaves()
+            self?.terminationReplyPending = false
+            sender.reply(toApplicationShouldTerminate: saved)
+        }
+        return .terminateLater
+    }
+}
+
 @main
 struct RalphyMediaApp: App {
+    @NSApplicationDelegateAdaptor(RalphyMediaApplicationDelegate.self)
+    private var appDelegate
     @StateObject private var viewModel = LibraryViewModel()
 
     init() {
@@ -29,6 +61,9 @@ struct RalphyMediaApp: App {
         WindowGroup("Ralphy Media") {
             LibraryWindow(viewModel: viewModel)
                 .frame(minWidth: 1100, minHeight: 720)
+                .onAppear {
+                    appDelegate.attach(viewModel: viewModel)
+                }
         }
         .windowStyle(.titleBar)
         .commands {
@@ -137,7 +172,11 @@ private struct LibraryCommands: Commands {
                 viewModel.requestTrash()
             }
             .keyboardShortcut(.delete, modifiers: .command)
-            .disabled(viewModel.selectedIDs.isEmpty)
+            .disabled(
+                viewModel.selectedIDs.isEmpty
+                    || viewModel.isApplyingQuery
+                    || viewModel.isTrashing
+            )
         }
     }
 }
