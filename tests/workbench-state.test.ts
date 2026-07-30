@@ -1,0 +1,232 @@
+import { describe, expect, test } from "vitest";
+import type {
+  CatalogResult,
+  ProjectScanResult,
+  ProjectSummary,
+  WorkspaceSummary,
+} from "../electron/media/types";
+import {
+  createInitialWorkbenchState,
+  readWorkbenchPreferences,
+  sortProjects,
+  sortWorkspaces,
+  workbenchReducer,
+  writeWorkbenchPreferences,
+} from "../src/state/workbench";
+
+const rootPath = "/tmp/demo/.ralphy";
+
+function workspace(
+  id: string,
+  recentActivity: string,
+): WorkspaceSummary {
+  return {
+    id,
+    name: id,
+    description: "",
+    absolutePath: `${rootPath}/workspaces/${id}`,
+    projectCount: 1,
+    sharedCount: 0,
+    unitCount: 0,
+    finalCount: 0,
+    recentActivity,
+  };
+}
+
+function project(
+  workspaceId: string,
+  projectId: string,
+  recentActivity: string,
+): ProjectSummary {
+  return {
+    id: `${workspaceId}/${projectId}`,
+    workspaceId,
+    projectId,
+    name: projectId,
+    brief: "",
+    absolutePath: `${rootPath}/workspaces/${workspaceId}/projects/${projectId}`,
+    status: "assets",
+    phase: "production",
+    finalState: "review",
+    platform: null,
+    aspectRatio: null,
+    spendUsd: null,
+    finalCount: 0,
+    sharedCount: 0,
+    unitCount: 0,
+    recentActivity,
+  };
+}
+
+const workspaces = [
+  workspace("older", "2026-07-20T00:00:00.000Z"),
+  workspace("newer", "2026-07-30T00:00:00.000Z"),
+];
+const projects = [
+  project("newer", "older-project", "2026-07-21T00:00:00.000Z"),
+  project("newer", "newer-project", "2026-07-29T00:00:00.000Z"),
+];
+const catalog: CatalogResult = {
+  rootPath,
+  generation: 4,
+  workspaces,
+  projects,
+  mediaItemCount: 0,
+  completedAt: "2026-07-30T00:00:01.000Z",
+};
+
+describe("workbench navigation", () => {
+  test("opening another library resets route history and project data", () => {
+    let state = createInitialWorkbenchState();
+    state = workbenchReducer(state, { type: "catalog-received", catalog });
+    state = workbenchReducer(state, { type: "open-workspace", workspaceId: "newer" });
+    state = workbenchReducer(state, {
+      type: "open-project",
+      project: { workspaceId: "newer", projectId: "newer-project" },
+    });
+
+    state = workbenchReducer(state, {
+      type: "library-opened",
+      catalog: { ...catalog, rootPath: "/tmp/other/.ralphy", generation: 1 },
+    });
+
+    expect(state.route).toEqual({ kind: "library" });
+    expect(state.history).toEqual([{ kind: "library" }]);
+    expect(state.project).toBeNull();
+  });
+
+  test("moves Library -> Workspace -> Project and back without a second sidebar", () => {
+    let state = createInitialWorkbenchState();
+    state = workbenchReducer(state, { type: "catalog-received", catalog });
+    state = workbenchReducer(state, { type: "open-workspace", workspaceId: "newer" });
+    expect(state.route).toEqual({ kind: "workspace", workspaceId: "newer" });
+
+    state = workbenchReducer(state, {
+      type: "open-project",
+      project: { workspaceId: "newer", projectId: "newer-project" },
+    });
+    expect(state.route).toEqual({
+      kind: "project",
+      workspaceId: "newer",
+      projectId: "newer-project",
+    });
+
+    state = workbenchReducer(state, { type: "back" });
+    expect(state.route).toEqual({ kind: "workspace", workspaceId: "newer" });
+    state = workbenchReducer(state, { type: "open-library" });
+    expect(state.route).toEqual({ kind: "library" });
+    state = workbenchReducer(state, { type: "forward" });
+    expect(state.route).toEqual({ kind: "workspace", workspaceId: "newer" });
+  });
+
+  test("rejects stale catalog and project results", () => {
+    let state = createInitialWorkbenchState();
+    state = workbenchReducer(state, { type: "catalog-received", catalog });
+    state = workbenchReducer(state, {
+      type: "catalog-received",
+      catalog: { ...catalog, generation: 3, workspaces: [] },
+    });
+    expect(state.catalog?.workspaces).toHaveLength(2);
+
+    state = workbenchReducer(state, {
+      type: "open-workspace",
+      workspaceId: "newer",
+    });
+    state = workbenchReducer(state, {
+      type: "open-project",
+      project: { workspaceId: "newer", projectId: "newer-project" },
+    });
+    state = workbenchReducer(state, {
+      type: "project-scan-started",
+      generation: 9,
+    });
+    const stale: ProjectScanResult = {
+      rootPath,
+      workspaceId: "newer",
+      projectId: "newer-project",
+      generation: 8,
+      items: [],
+      ledger: {
+        entries: [],
+        totalCostUsd: 0,
+        malformedLineCount: 0,
+        oversizedLineCount: 0,
+        truncated: false,
+      },
+      completedAt: "2026-07-30T00:00:01.000Z",
+    };
+    state = workbenchReducer(state, { type: "project-received", project: stale });
+    expect(state.project).toBeNull();
+  });
+
+  test("promotes scanned spend into workspace and library summaries", () => {
+    let state = createInitialWorkbenchState();
+    state = workbenchReducer(state, { type: "catalog-received", catalog });
+    state = workbenchReducer(state, { type: "open-workspace", workspaceId: "newer" });
+    state = workbenchReducer(state, {
+      type: "open-project",
+      project: { workspaceId: "newer", projectId: "newer-project" },
+    });
+    state = workbenchReducer(state, {
+      type: "project-received",
+      project: {
+        rootPath,
+        workspaceId: "newer",
+        projectId: "newer-project",
+        generation: 5,
+        items: [],
+        ledger: {
+          entries: [],
+          totalCostUsd: 12.34,
+          malformedLineCount: 0,
+          oversizedLineCount: 0,
+          truncated: false,
+        },
+        completedAt: "2026-07-30T00:00:01.000Z",
+      },
+    });
+
+    expect(
+      state.catalog?.projects.find((item) => item.projectId === "newer-project")?.spendUsd,
+    ).toBe(12.34);
+
+    state = workbenchReducer(state, {
+      type: "catalog-received",
+      catalog: { ...catalog, generation: 6 },
+    });
+    expect(
+      state.catalog?.projects.find((item) => item.projectId === "newer-project")?.spendUsd,
+    ).toBe(12.34);
+  });
+});
+
+describe("workbench ordering and preferences", () => {
+  test("keeps pinned entries first and sorts each group by activity", () => {
+    expect(sortWorkspaces(workspaces, ["older"]).map((item) => item.id)).toEqual([
+      "older",
+      "newer",
+    ]);
+    expect(sortProjects(projects, ["newer/newer-project"]).map((item) => item.id)).toEqual([
+      "newer/newer-project",
+      "newer/older-project",
+    ]);
+  });
+
+  test("round-trips app-local root, selection, and pins", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    };
+    const preferences = {
+      rootPath,
+      workspaceId: "newer",
+      projectId: "newer-project",
+      pinnedWorkspaceIds: ["newer"],
+      pinnedProjectIds: ["newer/newer-project"],
+    };
+
+    writeWorkbenchPreferences(storage, preferences);
+    expect(readWorkbenchPreferences(storage)).toEqual(preferences);
+  });
+});

@@ -35,20 +35,4 @@ const mediaBridge: MediaWorkbenchBridge = {
   getMediaUrl: (path) => ipcRenderer.invoke(MEDIA_CHANNELS.getMediaUrl, path),
 };
 
-contextBridge.exposeInMainWorld("ralphy", {
-  ...mediaBridge,
-
-  // Kept until Task 2 replaces the existing chat renderer.
-  getAuthState: () => ipcRenderer.invoke("auth:get"),
-  setAuthMethod: (method: string) => ipcRenderer.invoke("auth:set", method),
-  send: (prompt: string) => ipcRenderer.invoke("agent:send", prompt),
-  onEvent: (callback: (event: unknown) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, payload: unknown): void => {
-      callback(payload);
-    };
-    ipcRenderer.on("agent:event", listener);
-    return () => ipcRenderer.removeListener("agent:event", listener);
-  },
-  onPermission: () => () => undefined,
-  resolvePermission: async () => undefined,
-});
+contextBridge.exposeInMainWorld("ralphy", mediaBridge);

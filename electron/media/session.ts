@@ -60,6 +60,10 @@ export class MediaSessionState {
     }
   }
 
+  assertCurrent(operation: MediaSessionEpoch): void {
+    if (operation.epoch !== this.#epoch) throw new StaleMediaSessionError();
+  }
+
   completeOpen(
     operation: MediaSessionEpoch,
     rootPath: string,
@@ -286,6 +290,7 @@ export async function restorePersistedLibrary<Result>(
     }
     return await openLibrary(operation, rootPath);
   } catch (error) {
+    state.assertCurrent(operation);
     state.abortOpen(operation);
     if (error instanceof StaleMediaSessionError) throw error;
     if (error instanceof InvalidLibraryRootError) return null;

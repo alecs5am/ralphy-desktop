@@ -25,11 +25,13 @@ export type {
   MediaAnnotation,
   MediaEntity,
   MediaEvent,
+  MediaGroup,
   MediaItem,
   MediaKind,
   MediaQueryOptions,
   MediaWorkbenchBridge,
   ProjectReference,
+  ProjectMode,
   ProjectScanQuery,
   ProjectScanProgress,
   ProjectScanResult,
@@ -40,38 +42,7 @@ export type {
   WorkspaceSummary,
 } from "../../electron/media/types";
 
-export type AuthMethod = "subscription" | "api-key";
-
-export interface AuthState {
-  method: AuthMethod | null;
-  claudeBinaryReady: boolean;
-  apiKeyInEnv: boolean;
-}
-
-export type AgentEvent =
-  | { type: "system"; sessionId: string; tools: string[] }
-  | { type: "assistant-text"; text: string }
-  | { type: "tool-use"; id: string; name: string; summary: string; estCostUsd?: number }
-  | { type: "tool-result"; id: string; ok: boolean }
-  | { type: "result"; ok: boolean; costUsd: number };
-
-export interface PermissionRequest {
-  id: string;
-  toolName: string;
-  command: string;
-  estCostUsd?: number;
-}
-
-interface LegacyAgentBridge {
-  getAuthState(): Promise<AuthState>;
-  setAuthMethod(method: AuthMethod): Promise<void>;
-  send(prompt: string): Promise<void>;
-  onEvent(callback: (event: AgentEvent) => void): () => void;
-  onPermission(callback: (request: PermissionRequest) => void): () => void;
-  resolvePermission(id: string, allow: boolean): Promise<void>;
-}
-
-export interface RalphyBridge extends MediaWorkbenchBridge, LegacyAgentBridge {}
+export type RalphyBridge = MediaWorkbenchBridge;
 
 declare global {
   interface Window {
@@ -268,8 +239,6 @@ function mockCatalog(generation = 1): CatalogResult {
 
 function createMockBridge(): RalphyBridge {
   const mediaCallbacks = new Set<(event: MediaEvent) => void>();
-  const agentCallbacks = new Set<(event: AgentEvent) => void>();
-  const permissionCallbacks = new Set<(request: PermissionRequest) => void>();
   let annotations: AnnotationStore = {
     version: 1,
     items: {
@@ -287,10 +256,6 @@ function createMockBridge(): RalphyBridge {
   const emitMedia = (event: MediaEvent): void => {
     for (const callback of mediaCallbacks) callback(event);
   };
-  const emitAgent = (event: AgentEvent): void => {
-    for (const callback of agentCallbacks) callback(event);
-  };
-
   const openResult = (): LibraryOpenResult => ({
     rootPath: MOCK_ROOT,
     catalog: mockCatalog(),
@@ -374,25 +339,6 @@ function createMockBridge(): RalphyBridge {
       }
       return path;
     },
-
-    async getAuthState() {
-      return { method: "subscription", claudeBinaryReady: true, apiKeyInEnv: false };
-    },
-    async setAuthMethod() {},
-    async send(prompt: string) {
-      emitAgent({ type: "system", sessionId: "mock-session", tools: ["Read", "Bash"] });
-      emitAgent({ type: "assistant-text", text: `Reviewing "${prompt}".` });
-      emitAgent({ type: "result", ok: true, costUsd: 0 });
-    },
-    onEvent(callback) {
-      agentCallbacks.add(callback);
-      return () => agentCallbacks.delete(callback);
-    },
-    onPermission(callback) {
-      permissionCallbacks.add(callback);
-      return () => permissionCallbacks.delete(callback);
-    },
-    async resolvePermission() {},
   };
 }
 

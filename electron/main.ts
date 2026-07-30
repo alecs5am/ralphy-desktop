@@ -46,14 +46,13 @@ import {
   StaleMediaSessionError,
   stopMediaRuntime,
 } from "./media/session";
-import { ClaudeSession, detectClaude, type AgentEvent } from "./claude/session";
 
-const REPO_ROOT = join(__dirname, "..", "..");
 const RENDERER = join(__dirname, "..", "dist", "index.html");
 const WORKER_ENTRY = join(__dirname, "media", "worker.cjs");
 const SETTINGS_LIMIT_BYTES = 64 * 1024;
 const CLIPBOARD_LIMIT = 2 * 1024 * 1024;
 const MAX_TRASH_ITEMS = 1000;
+const SMOKE_TEST = process.argv.includes("--smoke-test");
 
 protocol.registerSchemesAsPrivileged([{
   scheme: "ralphy-media",
@@ -156,17 +155,11 @@ class MediaWorkerClient {
 
 let win: BrowserWindow | null = null;
 let worker: MediaWorkerClient | null = null;
-let session: ClaudeSession | null = null;
-let authMethod: "subscription" | "api-key" | null = null;
 const mediaState = new MediaSessionState();
 const watcher = new ActiveRootResource<LibraryWatcher>();
 
 function emitMedia(event: MediaEvent): void {
   sendIfWindowAlive(win, MEDIA_CHANNELS.event, event);
-}
-
-function emitAgent(event: AgentEvent): void {
-  sendIfWindowAlive(win, "agent:event", event);
 }
 
 function mediaWorker(): MediaWorkerClient {
@@ -352,28 +345,23 @@ async function openLibrary(
   operation: MediaSessionEpoch,
   rootPath: string,
 ): Promise<LibraryOpenResult> {
-  try {
-    const root = await validateLibraryRoot(rootPath);
-    mediaState.assertOpen(operation);
-    const catalog = await refreshCatalog(operation, root, false);
-    mediaState.assertOpen(operation);
-    const active = await watcher.replace({
-      assertCurrent: () => mediaState.assertOpen(operation),
-      create: () => createWatcher(root),
-      prepare: () => writeSettings(
-        { lastLibrary: root },
-        () => mediaState.assertOpen(operation),
-      ),
-      commit: () => mediaState.completeOpen(operation, root),
-    });
-    mediaState.assertActive(active);
-    emitMedia({ type: "catalog-result", result: catalog });
-    mediaState.assertActive(active);
-    return { rootPath: root, catalog };
-  } catch (error) {
-    mediaState.abortOpen(operation);
-    throw error;
-  }
+  const root = await validateLibraryRoot(rootPath);
+  mediaState.assertOpen(operation);
+  const catalog = await refreshCatalog(operation, root, false);
+  mediaState.assertOpen(operation);
+  const active = await watcher.replace({
+    assertCurrent: () => mediaState.assertOpen(operation),
+    create: () => createWatcher(root),
+    prepare: () => writeSettings(
+      { lastLibrary: root },
+      () => mediaState.assertOpen(operation),
+    ),
+    commit: () => mediaState.completeOpen(operation, root),
+  });
+  mediaState.assertActive(active);
+  emitMedia({ type: "catalog-result", result: catalog });
+  mediaState.assertActive(active);
+  return { rootPath: root, catalog };
 }
 
 function beginOpenOperation(): MediaSessionEpoch {
@@ -424,10 +412,10 @@ function registerMediaIpc(): void {
       openLibrary,
     );
   });
-  ipcMain.handle(MEDIA_CHANNELS.openLibrary, (_event, rootPath: unknown) => {
+  ipcMain.handle(MEDIA_CHANNELS.openLibrary, async (_event, rootPath: unknown) => {
     const operation = beginOpenOperation();
     try {
-      return openLibrary(operation, parseString(rootPath, "library path"));
+      return await openLibrary(operation, parseString(rootPath, "library path"));
     } catch (error) {
       mediaState.abortOpen(operation);
       throw error;
@@ -531,30 +519,6 @@ function registerMediaIpc(): void {
   });
 }
 
-function registerLegacyAgentIpc(): void {
-  ipcMain.handle("auth:get", async () => {
-    const detected = await detectClaude();
-    return {
-      method: authMethod,
-      claudeBinaryReady: detected.ready,
-      apiKeyInEnv: detected.apiKeyInEnv,
-    };
-  });
-  ipcMain.handle("auth:set", (_event, method: "subscription" | "api-key") => {
-    authMethod = method;
-  });
-  ipcMain.handle("agent:send", async (_event, prompt: string) => {
-    if (!session) {
-      session = new ClaudeSession({
-        projectDir: REPO_ROOT,
-        preferSubscription: authMethod === "subscription",
-        onEvent: emitAgent,
-      });
-    }
-    await session.send(prompt);
-  });
-}
-
 function createWindow(): void {
   const createdWindow = new BrowserWindow({
     width: 1200,
@@ -563,6 +527,7 @@ function createWindow(): void {
     minHeight: 720,
     titleBarStyle: "hiddenInset",
     backgroundColor: "#121212",
+    show: !SMOKE_TEST,
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -579,17 +544,36 @@ function createWindow(): void {
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) void createdWindow.loadURL(devUrl);
   else void createdWindow.loadFile(RENDERER);
+  if (SMOKE_TEST) {
+    createdWindow.webContents.once("did-finish-load", () => {
+      void (async () => {
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const ready = await createdWindow.webContents.executeJavaScript(
+            "Boolean(document.querySelector('.workbench') && window.ralphy?.chooseLibrary)",
+          );
+          if (ready) {
+            console.log("RALPHY_SMOKE_READY");
+            await new Promise((resolveReady) => setTimeout(resolveReady, 100));
+            app.exit(0);
+            return;
+          }
+          await new Promise((resolveReady) => setTimeout(resolveReady, 50));
+        }
+        app.exit(1);
+      })().catch((error: unknown) => {
+        console.error(error);
+        app.exit(1);
+      });
+    });
+  }
 }
 
 function stopBackgroundResources(): void {
   stopMediaRuntime(mediaState, { watcher, worker });
   worker = null;
-  session?.stop();
-  session = null;
 }
 
 registerMediaIpc();
-registerLegacyAgentIpc();
 
 void app.whenReady().then(() => {
   protocol.handle("ralphy-media", async (request) => {

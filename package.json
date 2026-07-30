@@ -1,9 +1,9 @@
 {
   "name": "ralphy-desktop",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Ralphy Desktop — embedded Claude Code chat over a Ralphy project.",
+  "description": "Fast macOS media review workbench for Ralphy workspaces and projects.",
   "main": "dist-electron/main.cjs",
   "scripts": {
     "dev": "vite",
@@ -13,10 +13,19 @@
     "build:electron": "node scripts/build-electron.mjs",
     "start": "bun run build:renderer && bun run build:electron && electron .",
     "build": "bun run build:renderer && bun run build:electron",
+    "benchmark": "bun scripts/benchmark-media.ts",
+    "smoke": "bun run build && node scripts/smoke-electron.mjs",
+    "icon:mac": "zsh scripts/build-mac-icon.sh",
+    "package:mac": "bun run build && bun run icon:mac && node scripts/package-mac.mjs",
     "preview": "vite preview"
   },
+  "trustedDependencies": [
+    "electron"
+  ],
   "dependencies": {
-    "framer-motion": "^12.39.0",
+    "@tanstack/react-virtual": "3.5.0",
+    "lucide-react": "0.564.0",
+    "marked": "16.4.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -27,7 +36,6 @@
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^33.2.0",
     "esbuild": "^0.24.2",
-    "got": "^11.8.6",
     "typescript": "^5.7.3",
     "vite": "^6.0.7",
     "vitest": "0.34.6"

@@ -49,6 +49,39 @@ describe("watcher path routing", () => {
 });
 
 describe("watcher lifecycle", () => {
+  test("observes media generated inside the selected project", async () => {
+    fixture = await makeLibraryFixture();
+    let resolveChange: (() => void) | undefined;
+    const changed = new Promise<void>((resolve) => {
+      resolveChange = resolve;
+    });
+    const onSelectedProjectChange = vi.fn(() => resolveChange?.());
+    const watcher = new LibraryWatcher({
+      rootPath: fixture.rootPath,
+      selectedProject: () => selected,
+      onCatalogChange: () => undefined,
+      onSelectedProjectChange,
+      debounceMs: 10,
+    });
+
+    try {
+      await expect(watcher.start()).resolves.toBe(true);
+      await writeFile(
+        join(fixture.alphaPath, "artifacts", "images", "live-generated.png"),
+        "png",
+      );
+      await Promise.race([
+        changed,
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error("watcher did not report generated media")), 2_000);
+        }),
+      ]);
+      expect(onSelectedProjectChange).toHaveBeenCalled();
+    } finally {
+      watcher.close();
+    }
+  });
+
   test("does not attach watchers after close wins a start race", async () => {
     fixture = await makeLibraryFixture();
     const onCatalogChange = vi.fn();

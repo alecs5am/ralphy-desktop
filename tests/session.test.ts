@@ -94,6 +94,32 @@ describe("media session epochs", () => {
     expect(state.requireRoot()).toBe("/tmp/previous/.ralphy");
   });
 
+  test("does not hide an invalid-root failure from a superseded restore", async () => {
+    const state = new MediaSessionState();
+    state.activateRoot("/tmp/previous/.ralphy");
+    const enteredValidation = deferred<void>();
+    const validation = deferred<void>();
+    const restoringOperation = state.beginOpen();
+    const restoring = restorePersistedLibrary(
+      state,
+      restoringOperation,
+      async () => "/tmp/missing/.ralphy",
+      async () => {
+        enteredValidation.resolve();
+        await validation.promise;
+        throw new InvalidLibraryRootError("Library root disappeared");
+      },
+    );
+
+    await enteredValidation.promise;
+    const explicitOperation = state.beginOpen();
+    state.completeOpen(explicitOperation, "/tmp/new/.ralphy");
+    validation.resolve();
+
+    await expect(restoring).rejects.toThrow(StaleMediaSessionError);
+    expect(state.requireRoot()).toBe("/tmp/new/.ralphy");
+  });
+
   test("does not hide unexpected persisted library failures", async () => {
     const state = new MediaSessionState();
     const operation = state.beginOpen();
