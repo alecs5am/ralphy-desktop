@@ -3,7 +3,11 @@
 import { build } from "esbuild";
 
 await build({
-  entryPoints: ["electron/main.ts", "electron/preload.ts"],
+  entryPoints: {
+    main: "electron/main.ts",
+    preload: "electron/preload.ts",
+    "media/worker": "electron/media/worker.ts",
+  },
   bundle: true,
   platform: "node",
   format: "cjs",

@@ -1,0 +1,230 @@
+export type ReviewStatus =
+  | "Unreviewed"
+  | "Approved"
+  | "Shortlist"
+  | "Needs Work"
+  | "Reject";
+
+export type MediaEntity =
+  | "final-render"
+  | "generated-artifact"
+  | "reference"
+  | "unit-asset"
+  | "lifecycle-document"
+  | "production-file"
+  | "other-project-file";
+
+export type MediaKind =
+  | "image"
+  | "video"
+  | "audio"
+  | "text"
+  | "pdf"
+  | "other";
+
+export interface ProjectReference {
+  workspaceId: string;
+  projectId: string;
+}
+
+export interface WorkspaceSummary {
+  id: string;
+  name: string;
+  description: string;
+  absolutePath: string;
+  projectCount: number;
+  sharedCount: number;
+  unitCount: number;
+  finalCount: number;
+  recentActivity: string;
+}
+
+export interface ProjectSummary extends ProjectReference {
+  id: string;
+  name: string;
+  brief: string;
+  absolutePath: string;
+  status: string;
+  phase: string | null;
+  finalState: string;
+  platform: string | null;
+  aspectRatio: string | null;
+  spendUsd: number | null;
+  finalCount: number;
+  sharedCount: number;
+  unitCount: number;
+  recentActivity: string;
+}
+
+export interface GenerationAttribution {
+  provider: string;
+  model: string;
+  operation: string;
+  timestamp: string;
+  costUsd: number | null;
+  slot: string | null;
+}
+
+export interface MediaItem extends ProjectReference {
+  id: string;
+  name: string;
+  absolutePath: string;
+  projectRelativePath: string;
+  entity: MediaEntity;
+  kind: MediaKind;
+  extension: string;
+  sizeBytes: number;
+  modifiedAt: string;
+  generation: GenerationAttribution | null;
+}
+
+export interface MediaAnnotation {
+  reviewStatus: ReviewStatus;
+  favorite: boolean;
+  rating: number;
+  tags: string[];
+  notes: string;
+  updatedAt: string;
+}
+
+export interface AnnotationInput {
+  reviewStatus: ReviewStatus;
+  favorite: boolean;
+  rating: number;
+  tags: string[];
+  notes: string;
+}
+
+export interface AnnotationStore {
+  version: number;
+  items: Record<string, MediaAnnotation>;
+}
+
+export type ProjectMode = "overview" | "finals" | "assets" | "refs" | "units" | "files";
+export type MediaSort = "recent" | "name" | "size" | "cost" | "review";
+export type MediaGroup = "none" | "entity" | "kind" | "review";
+
+export interface MediaQueryOptions {
+  mode: ProjectMode;
+  search: string;
+  entities: MediaEntity[];
+  kinds: MediaKind[];
+  reviewStatuses: ReviewStatus[];
+  sortBy: MediaSort;
+  sortDirection: "ascending" | "descending";
+  groupBy: MediaGroup;
+  includeIntermediate: boolean;
+}
+
+export interface CatalogProgress {
+  generation: number;
+  workspacesRead: number;
+  projectsRead: number;
+}
+
+export interface ProjectScanProgress extends ProjectReference {
+  generation: number;
+  filesScanned: number;
+  bytesScanned: number;
+}
+
+export interface CatalogResult {
+  rootPath: string;
+  generation: number;
+  workspaces: WorkspaceSummary[];
+  projects: ProjectSummary[];
+  mediaItemCount: 0;
+  completedAt: string;
+}
+
+export interface GenerationLedgerResult {
+  entries: GenerationAttribution[];
+  totalCostUsd: number;
+  malformedLineCount: number;
+  oversizedLineCount: number;
+  truncated: boolean;
+}
+
+export interface ProjectScanResult extends ProjectReference {
+  rootPath: string;
+  generation: number;
+  items: MediaItem[];
+  ledger: GenerationLedgerResult;
+  completedAt: string;
+}
+
+export interface ProjectScanRequest extends ProjectReference {
+  rootPath: string;
+  generation: number;
+}
+
+export interface LibraryOpenResult {
+  rootPath: string;
+  catalog: CatalogResult;
+}
+
+export interface TextReadResult {
+  text: string;
+  totalBytes: number;
+  truncated: boolean;
+}
+
+export interface TrashResult {
+  trashed: string[];
+  failed: Array<{ path: string; error: string }>;
+}
+
+export type MediaEvent =
+  | { type: "catalog-progress"; progress: CatalogProgress }
+  | { type: "catalog-result"; result: CatalogResult }
+  | { type: "project-progress"; progress: ProjectScanProgress }
+  | { type: "project-result"; result: ProjectScanResult }
+  | { type: "project-cancelled"; request: ProjectScanRequest }
+  | { type: "error"; operation: string; message: string; generation?: number };
+
+export interface MediaWorkbenchBridge {
+  chooseLibrary(): Promise<LibraryOpenResult | null>;
+  restoreLibrary(): Promise<LibraryOpenResult | null>;
+  openLibrary(rootPath: string): Promise<LibraryOpenResult>;
+  scanProject(project: ProjectReference): Promise<ProjectScanResult>;
+  cancelProjectScan(): Promise<void>;
+  onMediaEvent(callback: (event: MediaEvent) => void): () => void;
+  loadAnnotations(): Promise<AnnotationStore>;
+  updateAnnotations(updates: Record<string, AnnotationInput>): Promise<AnnotationStore>;
+  trashItems(paths: string[]): Promise<TrashResult>;
+  showInFinder(path: string): Promise<void>;
+  openExternal(path: string): Promise<string>;
+  copyText(text: string): Promise<void>;
+  readText(path: string, maxBytes?: number): Promise<TextReadResult>;
+  getMediaUrl(path: string): Promise<string>;
+}
+
+export const MEDIA_CHANNELS = {
+  chooseLibrary: "media:library:choose",
+  restoreLibrary: "media:library:restore",
+  openLibrary: "media:library:open",
+  scanProject: "media:project:scan",
+  cancelProjectScan: "media:project:cancel",
+  event: "media:event",
+  loadAnnotations: "media:annotations:load",
+  updateAnnotations: "media:annotations:update",
+  trashItems: "media:files:trash",
+  showInFinder: "media:files:finder",
+  openExternal: "media:files:open",
+  copyText: "media:clipboard:write",
+  readText: "media:text:read",
+  getMediaUrl: "media:url",
+} as const;
+
+export type WorkerRequest =
+  | { type: "catalog"; requestId: number; rootPath: string; generation: number }
+  | { type: "scan-project"; requestId: number; request: ProjectScanRequest }
+  | { type: "cancel-project" };
+
+export type WorkerResponse =
+  | { type: "catalog-progress"; requestId: number; progress: CatalogProgress }
+  | { type: "catalog-result"; requestId: number; result: CatalogResult }
+  | { type: "project-progress"; requestId: number; progress: ProjectScanProgress }
+  | { type: "project-result"; requestId: number; result: ProjectScanResult }
+  | { type: "project-cancelled"; requestId: number }
+  | { type: "error"; requestId: number; message: string };
