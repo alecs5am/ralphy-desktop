@@ -73,6 +73,51 @@ import Testing
     }
 }
 
+@Test func scannerRejectsSymlinkedWorkspaceAncestor() throws {
+    let root = try TemporaryRalphy.make()
+    try root.write("workspaces/two/projects/one/render/final.mp4", bytes: [1])
+    let workspaceLink = root.url.appending(path: "workspaces/ws")
+    try FileManager.default.createSymbolicLink(
+        at: workspaceLink,
+        withDestinationURL: root.url.appending(path: "workspaces/two")
+    )
+
+    var result: ScanResult?
+    do {
+        result = try MediaScanner().scan(
+            project: ProjectReference(workspaceID: "ws", projectID: "one"),
+            root: root.url
+        )
+        Issue.record("Expected symlinked workspace ancestor to be rejected")
+    } catch {
+        #expect(error as? MediaScannerError == .projectNotFound)
+    }
+    #expect(result?.items.isEmpty ?? true)
+}
+
+@Test func scannerRejectsSymlinkedProjectsAncestor() throws {
+    let root = try TemporaryRalphy.make()
+    try root.write("workspaces/ws/placeholder.txt", bytes: [1])
+    try root.write("workspaces/two/projects/one/render/final.mp4", bytes: [1])
+    let projectsLink = root.url.appending(path: "workspaces/ws/projects")
+    try FileManager.default.createSymbolicLink(
+        at: projectsLink,
+        withDestinationURL: root.url.appending(path: "workspaces/two/projects")
+    )
+
+    var result: ScanResult?
+    do {
+        result = try MediaScanner().scan(
+            project: ProjectReference(workspaceID: "ws", projectID: "one"),
+            root: root.url
+        )
+        Issue.record("Expected symlinked projects ancestor to be rejected")
+    } catch {
+        #expect(error as? MediaScannerError == .projectNotFound)
+    }
+    #expect(result?.items.isEmpty ?? true)
+}
+
 @Test func scannerSkipsInternalRenderWorkByDefault() throws {
     let root = try TemporaryRalphy.make()
     try root.write("workspaces/ws/projects/p/render/work-123/frame.jpg", bytes: [1])

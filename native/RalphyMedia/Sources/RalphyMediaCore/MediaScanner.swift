@@ -62,20 +62,22 @@ public struct MediaScanner: Sendable {
             throw MediaScannerError.invalidProjectPath
         }
 
-        let projectURL = root.appending(path: project.relativePath).standardizedFileURL
-        let expectedParent = root
-            .appending(path: "workspaces")
-            .appending(path: project.workspaceID)
-            .appending(path: "projects")
-            .standardizedFileURL
-        guard projectURL.deletingLastPathComponent() == expectedParent,
-              projectURL.resolvingSymlinksInPath().isDescendant(of: root.resolvingSymlinksInPath()),
-              let values = try? projectURL.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
-              values.isDirectory == true,
-              values.isSymbolicLink != true else {
+        let workspacesURL = root.appending(path: "workspaces").standardizedFileURL
+        let workspaceURL = workspacesURL.appending(path: project.workspaceID)
+        let projectsURL = workspaceURL.appending(path: "projects")
+        let projectURL = projectsURL.appending(path: project.projectID)
+        guard [workspacesURL, workspaceURL, projectsURL, projectURL].allSatisfy(isDirectoryWithoutSymlink),
+              projectURL.resolvingSymlinksInPath().isDescendant(of: root.resolvingSymlinksInPath()) else {
             throw MediaScannerError.projectNotFound
         }
         return projectURL
+    }
+
+    private func isDirectoryWithoutSymlink(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else {
+            return false
+        }
+        return values.isDirectory == true && values.isSymbolicLink != true
     }
 
     private func scan(
