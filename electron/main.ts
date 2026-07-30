@@ -41,6 +41,7 @@ import {
   guardedSideEffect,
   type MediaSessionEpoch,
   MediaSessionState,
+  restorePersistedLibrary,
   sendIfWindowAlive,
   StaleMediaSessionError,
   stopMediaRuntime,
@@ -414,21 +415,14 @@ function registerMediaIpc(): void {
       throw error;
     }
   });
-  ipcMain.handle(MEDIA_CHANNELS.restoreLibrary, async () => {
+  ipcMain.handle(MEDIA_CHANNELS.restoreLibrary, () => {
     const operation = beginOpenOperation();
-    try {
-      const assertCurrent = (): void => mediaState.assertOpen(operation);
-      const { lastLibrary } = await readSettings(assertCurrent);
-      assertCurrent();
-      if (!lastLibrary) {
-        mediaState.abortOpen(operation);
-        return null;
-      }
-      return await openLibrary(operation, lastLibrary);
-    } catch {
-      mediaState.abortOpen(operation);
-      return null;
-    }
+    return restorePersistedLibrary(
+      mediaState,
+      operation,
+      async (assertCurrent) => (await readSettings(assertCurrent)).lastLibrary,
+      openLibrary,
+    );
   });
   ipcMain.handle(MEDIA_CHANNELS.openLibrary, (_event, rootPath: unknown) => {
     const operation = beginOpenOperation();

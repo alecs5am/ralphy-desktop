@@ -30,6 +30,13 @@ const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 type JsonObject = Record<string, unknown>;
 
+export class InvalidLibraryRootError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidLibraryRootError";
+  }
+}
+
 function isInside(rootPath: string, candidatePath: string): boolean {
   const rel = relative(rootPath, candidatePath);
   return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
@@ -140,17 +147,21 @@ export function validateIdentifier(value: string, label: string): void {
 export async function validateLibraryRoot(rootPath: string): Promise<string> {
   const resolvedRoot = resolve(rootPath);
   if (basename(resolvedRoot) !== ".ralphy") {
-    throw new Error("Library root must be a .ralphy directory");
+    throw new InvalidLibraryRootError("Library root must be a .ralphy directory");
   }
   const info = await lstat(resolvedRoot).catch(() => null);
   if (!info?.isDirectory() || info.isSymbolicLink()) {
-    throw new Error("Library root must be a real directory, not a symbolic link");
+    throw new InvalidLibraryRootError(
+      "Library root must be a real directory, not a symbolic link",
+    );
   }
   const canonicalRoot = await realpath(resolvedRoot);
   const workspacesPath = join(canonicalRoot, "workspaces");
   const workspacesInfo = await lstat(workspacesPath).catch(() => null);
   if (!workspacesInfo?.isDirectory() || workspacesInfo.isSymbolicLink()) {
-    throw new Error("Library root must contain a real workspaces directory");
+    throw new InvalidLibraryRootError(
+      "Library root must contain a real workspaces directory",
+    );
   }
   return canonicalRoot;
 }

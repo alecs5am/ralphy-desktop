@@ -1,9 +1,11 @@
 import { describe, expect, test, vi } from "vitest";
+import { InvalidLibraryRootError } from "../electron/media/catalog";
 import {
   ActiveRootResource,
   guardedResult,
   guardedSideEffect,
   MediaSessionState,
+  restorePersistedLibrary,
   sendIfWindowAlive,
   StaleMediaSessionError,
   stopMediaRuntime,
@@ -46,6 +48,65 @@ describe("media session epochs", () => {
 
     await expect(firstOpen).rejects.toThrow(StaleMediaSessionError);
     expect(state.requireRoot()).toBe("/tmp/second/.ralphy");
+  });
+
+  test("rejects an old restore after a newer explicit open wins", async () => {
+    const state = new MediaSessionState();
+    state.activateRoot("/tmp/previous/.ralphy");
+    const persistedRoot = deferred<string | null>();
+    const restoringOperation = state.beginOpen();
+    const openPersistedRoot = vi.fn(async (
+      operation: typeof restoringOperation,
+      rootPath: string,
+    ) => state.completeOpen(operation, rootPath));
+    const restoring = restorePersistedLibrary(
+      state,
+      restoringOperation,
+      () => persistedRoot.promise,
+      openPersistedRoot,
+    );
+
+    const openingOperation = state.beginOpen();
+    state.completeOpen(openingOperation, "/tmp/new/.ralphy");
+    persistedRoot.resolve("/tmp/old/.ralphy");
+
+    await expect(restoring).rejects.toThrow(StaleMediaSessionError);
+    expect(openPersistedRoot).not.toHaveBeenCalled();
+    expect(state.requireRoot()).toBe("/tmp/new/.ralphy");
+  });
+
+  test("maps an invalid persisted library to an empty restore", async () => {
+    const state = new MediaSessionState();
+    state.activateRoot("/tmp/previous/.ralphy");
+    const operation = state.beginOpen();
+    const result = await restorePersistedLibrary(
+      state,
+      operation,
+      async () => "/tmp/missing/.ralphy",
+      async () => {
+        throw new InvalidLibraryRootError(
+          "Library root must contain a real workspaces directory",
+        );
+      },
+    );
+
+    expect(result).toBeNull();
+    expect(state.requireRoot()).toBe("/tmp/previous/.ralphy");
+  });
+
+  test("does not hide unexpected persisted library failures", async () => {
+    const state = new MediaSessionState();
+    const operation = state.beginOpen();
+    const restoring = restorePersistedLibrary(
+      state,
+      operation,
+      async () => "/tmp/current/.ralphy",
+      async () => {
+        throw new Error("media worker failed");
+      },
+    );
+
+    await expect(restoring).rejects.toThrow("media worker failed");
   });
 
   test("invalidates a delayed open when runtime stop wins", () => {

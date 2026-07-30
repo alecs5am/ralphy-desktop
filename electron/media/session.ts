@@ -1,4 +1,5 @@
 import { MediaProtocolAccess } from "./protocol-access";
+import { InvalidLibraryRootError } from "./catalog";
 import type {
   CatalogProgress,
   ProjectReference,
@@ -263,6 +264,32 @@ export class MediaSessionState {
     } else {
       this.assertOpen(operation);
     }
+  }
+}
+
+export async function restorePersistedLibrary<Result>(
+  state: MediaSessionState,
+  operation: MediaSessionEpoch,
+  readRoot: (assertCurrent: () => void) => Promise<string | null>,
+  openLibrary: (
+    operation: MediaSessionEpoch,
+    rootPath: string,
+  ) => Promise<Result>,
+): Promise<Result | null> {
+  try {
+    const assertCurrent = (): void => state.assertOpen(operation);
+    const rootPath = await readRoot(assertCurrent);
+    assertCurrent();
+    if (!rootPath) {
+      state.abortOpen(operation);
+      return null;
+    }
+    return await openLibrary(operation, rootPath);
+  } catch (error) {
+    state.abortOpen(operation);
+    if (error instanceof StaleMediaSessionError) throw error;
+    if (error instanceof InvalidLibraryRootError) return null;
+    throw error;
   }
 }
 
