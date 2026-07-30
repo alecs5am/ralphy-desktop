@@ -16,9 +16,7 @@ import { pathToFileURL } from "node:url";
 import { loadAnnotations, updateAnnotations } from "./media/annotations";
 import {
   readBoundedText,
-  resolveContainedPath,
   resolveProjectPath,
-  trashContainedItems,
   validateLibraryRoot,
 } from "./media/catalog";
 import {
@@ -27,6 +25,7 @@ import {
   type LibraryOpenResult,
   type MediaEvent,
   type ProjectReference,
+  type ProjectScanQuery,
   type ProjectScanRequest,
   type ProjectScanResult,
   type WorkerRequest,
@@ -34,7 +33,14 @@ import {
 } from "./media/types";
 import { LibraryWatcher } from "./media/watcher";
 import { ScanRequestCancelledError } from "./media/worker";
-import { MediaProtocolAccess } from "./media/protocol-access";
+import { trashAuthorizedItems } from "./media/protocol-access";
+import {
+  ActiveRootResource,
+  MediaSessionState,
+  sendIfWindowAlive,
+  StaleMediaSessionError,
+  stopMediaRuntime,
+} from "./media/session";
 import { ClaudeSession, detectClaude, type AgentEvent } from "./claude/session";
 
 const REPO_ROOT = join(__dirname, "..", "..");
@@ -143,38 +149,33 @@ class MediaWorkerClient {
   }
 }
 
-class StaleMediaResultError extends Error {
-  constructor() {
-    super("Stale media result discarded");
-    this.name = "StaleMediaResultError";
-  }
-}
-
 let win: BrowserWindow | null = null;
-let activeRoot: string | null = null;
-let selectedProject: ProjectReference | null = null;
-let catalogGeneration = 0;
-let projectGeneration = 0;
 let worker: MediaWorkerClient | null = null;
-let watcher: LibraryWatcher | null = null;
 let session: ClaudeSession | null = null;
 let authMethod: "subscription" | "api-key" | null = null;
-const mediaProtocolAccess = new MediaProtocolAccess();
+const mediaState = new MediaSessionState();
+const watcher = new ActiveRootResource<LibraryWatcher>();
 
 function emitMedia(event: MediaEvent): void {
-  win?.webContents.send(MEDIA_CHANNELS.event, event);
+  sendIfWindowAlive(win, MEDIA_CHANNELS.event, event);
 }
 
 function emitAgent(event: AgentEvent): void {
-  win?.webContents.send("agent:event", event);
+  sendIfWindowAlive(win, "agent:event", event);
 }
 
 function mediaWorker(): MediaWorkerClient {
   if (!worker) {
     worker = new MediaWorkerClient((message) => {
-      if (message.type === "catalog-progress") {
+      if (
+        message.type === "catalog-progress"
+        && mediaState.isCurrentCatalogProgress(message.progress)
+      ) {
         emitMedia({ type: "catalog-progress", progress: message.progress });
-      } else if (message.type === "project-progress") {
+      } else if (
+        message.type === "project-progress"
+        && mediaState.isCurrentProject(message.progress)
+      ) {
         emitMedia({ type: "project-progress", progress: message.progress });
       }
     });
@@ -211,8 +212,7 @@ async function writeSettings(settings: AppSettings): Promise<void> {
 }
 
 function requireActiveRoot(): string {
-  if (!activeRoot) throw new Error("No active .ralphy library");
-  return activeRoot;
+  return mediaState.requireRoot();
 }
 
 function parseString(value: unknown, label: string, maxLength = 4096): string {
@@ -231,41 +231,36 @@ function parseProjectReference(value: unknown): ProjectReference {
   };
 }
 
-async function refreshCatalog(rootPath = requireActiveRoot()): Promise<CatalogResult> {
-  const generation = ++catalogGeneration;
-  const result = await mediaWorker().catalog(rootPath, generation);
-  if (activeRoot !== rootPath || generation !== catalogGeneration) {
-    throw new StaleMediaResultError();
+function parseProjectScanQuery(value: unknown): ProjectScanQuery {
+  if (value === undefined) return {};
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid project scan options");
   }
+  const includeIntermediate = (value as Record<string, unknown>).includeIntermediate;
+  if (includeIntermediate !== undefined && typeof includeIntermediate !== "boolean") {
+    throw new Error("Invalid intermediate scan option");
+  }
+  return { includeIntermediate };
+}
+
+async function refreshCatalog(rootPath = requireActiveRoot()): Promise<CatalogResult> {
+  const generation = mediaState.beginCatalog(rootPath);
+  const result = await mediaWorker().catalog(rootPath, generation);
+  mediaState.acceptCatalog(rootPath, generation);
   emitMedia({ type: "catalog-result", result });
   return result;
 }
 
 async function scanSelectedProject(
   project: ProjectReference,
+  options: ProjectScanQuery = {},
 ): Promise<ProjectScanResult> {
   const rootPath = requireActiveRoot();
   await resolveProjectPath(rootPath, project.workspaceId, project.projectId);
-  if (
-    selectedProject?.workspaceId !== project.workspaceId
-    || selectedProject.projectId !== project.projectId
-  ) {
-    mediaProtocolAccess.clear();
-  }
-  selectedProject = project;
-  const generation = ++projectGeneration;
-  const request: ProjectScanRequest = { rootPath, ...project, generation };
+  const request = mediaState.beginProject(project, options);
   try {
     const result = await mediaWorker().scanProject(request);
-    if (
-      activeRoot !== rootPath
-      || generation !== projectGeneration
-      || selectedProject?.workspaceId !== project.workspaceId
-      || selectedProject.projectId !== project.projectId
-    ) {
-      throw new StaleMediaResultError();
-    }
-    mediaProtocolAccess.replace(result);
+    mediaState.acceptProject(request, result);
     emitMedia({ type: "project-result", result });
     return result;
   } catch (error) {
@@ -276,14 +271,13 @@ async function scanSelectedProject(
   }
 }
 
-async function startWatcher(rootPath: string): Promise<void> {
-  watcher?.close();
-  watcher = new LibraryWatcher({
+function createWatcher(rootPath: string): LibraryWatcher {
+  return new LibraryWatcher({
     rootPath,
-    selectedProject: () => selectedProject,
+    selectedProject: () => mediaState.selectedForWatcher(rootPath),
     onCatalogChange() {
       void refreshCatalog(rootPath).catch((error: unknown) => {
-        if (!(error instanceof StaleMediaResultError)) {
+        if (!(error instanceof StaleMediaSessionError)) {
           emitMedia({
             type: "error",
             operation: "catalog-refresh",
@@ -293,11 +287,12 @@ async function startWatcher(rootPath: string): Promise<void> {
       });
     },
     onSelectedProjectChange() {
-      const project = selectedProject;
-      if (!project) return;
-      void scanSelectedProject(project).catch((error: unknown) => {
+      const project = mediaState.selectedForWatcher(rootPath);
+      const options = mediaState.scanOptionsForWatcher(rootPath);
+      if (!project || !options) return;
+      void scanSelectedProject(project, options).catch((error: unknown) => {
         if (
-          !(error instanceof StaleMediaResultError)
+          !(error instanceof StaleMediaSessionError)
           && !(error instanceof ScanRequestCancelledError)
         ) {
           emitMedia({
@@ -309,28 +304,31 @@ async function startWatcher(rootPath: string): Promise<void> {
       });
     },
     onError(error) {
-      emitMedia({ type: "error", operation: "watch", message: error.message });
+      if (mediaState.isActiveRoot(rootPath)) {
+        emitMedia({ type: "error", operation: "watch", message: error.message });
+      }
     },
   });
-  await watcher.start();
 }
 
 async function openLibrary(rootPath: string): Promise<LibraryOpenResult> {
   const root = await validateLibraryRoot(rootPath);
-  mediaWorker().cancelProject();
-  activeRoot = root;
-  selectedProject = null;
-  projectGeneration += 1;
-  mediaProtocolAccess.clear();
+  watcher.close();
+  mediaState.activateRoot(root);
+  worker?.cancelProject();
   const catalog = await refreshCatalog(root);
-  await writeSettings({ lastLibrary: root });
-  await startWatcher(root);
+  await watcher.replace(
+    mediaState,
+    root,
+    () => createWatcher(root),
+    () => writeSettings({ lastLibrary: root }),
+  );
   return { rootPath: root, catalog };
 }
 
 async function mediaUrl(path: string): Promise<string> {
   const root = requireActiveRoot();
-  const token = await mediaProtocolAccess.mint(root, path);
+  const token = await mediaState.fileAccess.mint(root, path);
   return `ralphy-media://asset/${token}`;
 }
 
@@ -358,12 +356,12 @@ function registerMediaIpc(): void {
   ipcMain.handle(MEDIA_CHANNELS.openLibrary, (_event, rootPath: unknown) => (
     openLibrary(parseString(rootPath, "library path"))
   ));
-  ipcMain.handle(MEDIA_CHANNELS.scanProject, (_event, project: unknown) => (
-    scanSelectedProject(parseProjectReference(project))
+  ipcMain.handle(MEDIA_CHANNELS.scanProject, (_event, project: unknown, options: unknown) => (
+    scanSelectedProject(parseProjectReference(project), parseProjectScanQuery(options))
   ));
   ipcMain.handle(MEDIA_CHANNELS.cancelProjectScan, () => {
-    projectGeneration += 1;
-    mediaWorker().cancelProject();
+    mediaState.deselectProject();
+    worker?.cancelProject();
   });
   ipcMain.handle(MEDIA_CHANNELS.loadAnnotations, () => loadAnnotations(requireActiveRoot()));
   ipcMain.handle(MEDIA_CHANNELS.updateAnnotations, (_event, updates: unknown) => (
@@ -377,18 +375,27 @@ function registerMediaIpc(): void {
     ) {
       throw new Error("Invalid Trash paths");
     }
-    return trashContainedItems(requireActiveRoot(), rawPaths, (path) => shell.trashItem(path));
+    const paths = rawPaths.map((path) => parseString(path, "Trash path"));
+    const root = requireActiveRoot();
+    return trashAuthorizedItems(
+      root,
+      paths,
+      mediaState.fileAccess,
+      (path) => shell.trashItem(path),
+    );
   });
   ipcMain.handle(MEDIA_CHANNELS.showInFinder, async (_event, rawPath: unknown) => {
-    const path = await resolveContainedPath(
-      requireActiveRoot(),
+    const root = requireActiveRoot();
+    const path = await mediaState.fileAccess.resolveFile(
+      root,
       parseString(rawPath, "Finder path"),
     );
     shell.showItemInFolder(path);
   });
   ipcMain.handle(MEDIA_CHANNELS.openExternal, async (_event, rawPath: unknown) => {
-    const path = await resolveContainedPath(
-      requireActiveRoot(),
+    const root = requireActiveRoot();
+    const path = await mediaState.fileAccess.resolveFile(
+      root,
       parseString(rawPath, "external path"),
     );
     return shell.openPath(path);
@@ -403,11 +410,12 @@ function registerMediaIpc(): void {
       const maxBytes = typeof rawMaxBytes === "number" && Number.isFinite(rawMaxBytes)
         ? rawMaxBytes
         : undefined;
-      return readBoundedText(
-        requireActiveRoot(),
+      const root = requireActiveRoot();
+      return mediaState.fileAccess.resolveFile(
+        root,
         parseString(rawPath, "text path"),
-        maxBytes,
-      );
+        ["text"],
+      ).then((path) => readBoundedText(root, path, maxBytes));
     },
   );
   ipcMain.handle(MEDIA_CHANNELS.getMediaUrl, (_event, rawPath: unknown) => (
@@ -440,7 +448,7 @@ function registerLegacyAgentIpc(): void {
 }
 
 function createWindow(): void {
-  win = new BrowserWindow({
+  const createdWindow = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 1100,
@@ -453,9 +461,20 @@ function createWindow(): void {
       nodeIntegration: false,
     },
   });
+  win = createdWindow;
+  createdWindow.on("closed", () => {
+    if (win === createdWindow) win = null;
+  });
   const devUrl = process.env.VITE_DEV_SERVER_URL;
-  if (devUrl) void win.loadURL(devUrl);
-  else void win.loadFile(RENDERER);
+  if (devUrl) void createdWindow.loadURL(devUrl);
+  else void createdWindow.loadFile(RENDERER);
+}
+
+function stopBackgroundResources(): void {
+  stopMediaRuntime(mediaState, { watcher, worker });
+  worker = null;
+  session?.stop();
+  session = null;
 }
 
 registerMediaIpc();
@@ -466,9 +485,9 @@ void app.whenReady().then(() => {
     const url = new URL(request.url);
     if (url.hostname !== "asset") return new Response("Not found", { status: 404 });
     const token = url.pathname.slice(1);
-    if (!activeRoot) return new Response("Not found", { status: 404 });
     try {
-      const safePath = await mediaProtocolAccess.resolve(activeRoot, token);
+      const root = requireActiveRoot();
+      const safePath = await mediaState.fileAccess.resolve(root, token);
       return net.fetch(pathToFileURL(safePath).toString());
     } catch {
       return new Response("Forbidden", { status: 403 });
@@ -478,13 +497,12 @@ void app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
+  stopBackgroundResources();
   if (process.platform !== "darwin") app.quit();
 });
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 app.on("before-quit", () => {
-  watcher?.close();
-  worker?.close();
-  session?.stop();
+  stopBackgroundResources();
 });

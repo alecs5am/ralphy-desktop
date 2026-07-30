@@ -116,6 +116,10 @@ export interface MediaQueryOptions {
   includeIntermediate: boolean;
 }
 
+export interface ProjectScanQuery {
+  includeIntermediate?: boolean;
+}
+
 export interface CatalogProgress {
   generation: number;
   workspacesRead: number;
@@ -156,6 +160,7 @@ export interface ProjectScanResult extends ProjectReference {
 export interface ProjectScanRequest extends ProjectReference {
   rootPath: string;
   generation: number;
+  includeIntermediate?: boolean;
 }
 
 export interface LibraryOpenResult {
@@ -186,7 +191,10 @@ export interface MediaWorkbenchBridge {
   chooseLibrary(): Promise<LibraryOpenResult | null>;
   restoreLibrary(): Promise<LibraryOpenResult | null>;
   openLibrary(rootPath: string): Promise<LibraryOpenResult>;
-  scanProject(project: ProjectReference): Promise<ProjectScanResult>;
+  scanProject(
+    project: ProjectReference,
+    options?: ProjectScanQuery,
+  ): Promise<ProjectScanResult>;
   cancelProjectScan(): Promise<void>;
   onMediaEvent(callback: (event: MediaEvent) => void): () => void;
   loadAnnotations(): Promise<AnnotationStore>;

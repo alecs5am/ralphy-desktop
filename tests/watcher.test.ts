@@ -1,9 +1,17 @@
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, expect, test } from "vitest";
-import { routeLibraryChange } from "../electron/media/watcher";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { LibraryWatcher, routeLibraryChange } from "../electron/media/watcher";
+import { makeLibraryFixture, type LibraryFixture } from "./fixtures";
 
 const root = "/tmp/example/.ralphy";
 const selected = { workspaceId: "studio", projectId: "alpha-001" };
+let fixture: LibraryFixture | undefined;
+
+afterEach(async () => {
+  if (fixture) await rm(fixture.parentPath, { recursive: true, force: true });
+  fixture = undefined;
+});
 
 describe("watcher path routing", () => {
   test.each([
@@ -37,5 +45,28 @@ describe("watcher path routing", () => {
       catalog: false,
       selectedProject: false,
     });
+  });
+});
+
+describe("watcher lifecycle", () => {
+  test("does not attach watchers after close wins a start race", async () => {
+    fixture = await makeLibraryFixture();
+    const onCatalogChange = vi.fn();
+    const watcher = new LibraryWatcher({
+      rootPath: fixture.rootPath,
+      selectedProject: () => null,
+      onCatalogChange,
+      onSelectedProjectChange: () => undefined,
+      debounceMs: 1,
+    });
+
+    const starting = watcher.start();
+    watcher.close();
+    await expect(starting).resolves.toBe(false);
+    await writeFile(join(fixture.rootPath, "registry.json"), "{}");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    watcher.close();
+
+    expect(onCatalogChange).not.toHaveBeenCalled();
   });
 });

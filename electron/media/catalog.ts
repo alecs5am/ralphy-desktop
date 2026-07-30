@@ -106,11 +106,20 @@ async function hasFile(path: string): Promise<boolean> {
   return info?.isFile() ?? false;
 }
 
+function projectIdentity(workspaceId: string, projectId: string): string {
+  return `${workspaceId}/${projectId}`;
+}
+
 function registryProjects(registry: unknown): Record<string, JsonObject> {
   const projects = asObject(asObject(registry).projects);
-  return Object.fromEntries(
-    Object.entries(projects).map(([id, value]) => [id, asObject(value)]),
-  );
+  const indexed: Record<string, JsonObject> = {};
+  for (const [key, value] of Object.entries(projects)) {
+    const project = asObject(value);
+    const projectId = stringValue(project.id) ?? key;
+    const workspaceId = stringValue(project.workspace);
+    if (workspaceId) indexed[projectIdentity(workspaceId, projectId)] = project;
+  }
+  return indexed;
 }
 
 function projectStatus(
@@ -250,7 +259,7 @@ export async function buildShallowCatalog(
 
     for (const projectId of projectIds) {
       const projectPath = join(workspacePath, "projects", projectId);
-      const registryData = registry[projectId] ?? {};
+      const registryData = registry[projectIdentity(workspaceId, projectId)] ?? {};
       const plan = asObject(await readBoundedJson(join(projectPath, "production-plan.json")));
       const projectUnitCount = await directCount(join(projectPath, "units"));
       const projectFinalCount = await directFinalCount(projectPath);
@@ -271,7 +280,7 @@ export async function buildShallowCatalog(
       const project: ProjectSummary = {
         workspaceId,
         projectId,
-        id: projectId,
+        id: projectIdentity(workspaceId, projectId),
         name: stringValue(registryData.name, plan.name) ?? projectId,
         brief: stringValue(registryData.brief, plan.brief) ?? "",
         absolutePath: projectPath,

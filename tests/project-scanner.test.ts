@@ -1,4 +1,4 @@
-import { readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
@@ -187,6 +187,85 @@ describe("selected project scanner", () => {
     });
 
     expect(result.ledger).toMatchObject({ entries: [], totalCostUsd: 0 });
+  });
+
+  test("does not follow a symlinked logs directory outside the project", async () => {
+    fixture = await makeLibraryFixture();
+    const outsideLogs = join(fixture.parentPath, "outside-logs");
+    await mkdir(outsideLogs);
+    await writeFile(join(outsideLogs, "generations.jsonl"), `${JSON.stringify({
+      timestamp: "2026-07-30T00:00:00.000Z",
+      provider: "outside",
+      model: "outside",
+      kind: "video",
+      cost_usd: 999,
+    })}\n`);
+    await rm(join(fixture.alphaPath, "logs"), { recursive: true });
+    await symlink(outsideLogs, join(fixture.alphaPath, "logs"));
+
+    const result = await scanProject({
+      rootPath: fixture.rootPath,
+      workspaceId: "studio",
+      projectId: "alpha-001",
+      generation: 1,
+    });
+
+    expect(result.ledger).toMatchObject({ entries: [], totalCostUsd: 0 });
+  });
+
+  test("prunes real-style intermediate trees by default and supports explicit opt-in", async () => {
+    fixture = await makeLibraryFixture();
+    const intermediateFiles = [
+      "render/work-123/compiled/__hyperframes_video_frames/0001.png",
+      "render/work-123/captured-frames/diagnostics/frame.jpg",
+      "render/work-123/video-only.mp4",
+      "node_modules/pkg/index.js",
+      "dist/bundle.js",
+      ".cache/thumb.jpg",
+    ];
+    for (const path of intermediateFiles) {
+      const absolutePath = join(fixture.alphaPath, path);
+      await mkdir(join(absolutePath, ".."), { recursive: true });
+      await writeFile(absolutePath, path);
+    }
+
+    const request = {
+      rootPath: fixture.rootPath,
+      workspaceId: "studio",
+      projectId: "alpha-001",
+      generation: 1,
+    };
+    const relevant = await scanProject(request);
+    const complete = await scanProject(request, { includeIntermediate: true });
+    const relevantPaths = relevant.items.map((item) => item.projectRelativePath);
+    const completePaths = complete.items.map((item) => item.projectRelativePath);
+
+    expect(relevantPaths).toContain("render/final.mp4");
+    expect(relevantPaths).not.toEqual(expect.arrayContaining(intermediateFiles));
+    expect(completePaths).toEqual(expect.arrayContaining(intermediateFiles));
+  });
+
+  test("throttles progress while always reporting the final item count", async () => {
+    fixture = await makeLibraryFixture();
+    const batchPath = join(fixture.alphaPath, "artifacts", "batch");
+    await mkdir(batchPath);
+    for (let index = 0; index < 250; index += 1) {
+      await writeFile(join(batchPath, `${index}.txt`), String(index));
+    }
+    const progress: number[] = [];
+
+    const result = await scanProject(
+      {
+        rootPath: fixture.rootPath,
+        workspaceId: "studio",
+        projectId: "alpha-001",
+        generation: 1,
+      },
+      { onProgress: (event) => progress.push(event.filesScanned) },
+    );
+
+    expect(progress.at(-1)).toBe(result.items.length);
+    expect(progress.length).toBeLessThanOrEqual(Math.ceil(result.items.length / 100) + 1);
   });
 
   test("rejects a project symlink that leaves the selected workspace", async () => {

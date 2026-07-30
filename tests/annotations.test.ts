@@ -86,6 +86,43 @@ describe("media annotations", () => {
     });
   });
 
+  test("rejects future-schema writes without dropping unknown fields", async () => {
+    fixture = await makeLibraryFixture();
+    const storeDir = join(fixture.rootPath, "media-library");
+    const storePath = join(storeDir, "library.json");
+    await mkdir(storeDir, { recursive: true });
+    const future = {
+      version: 99,
+      futureTopLevel: { mode: "keep-me" },
+      items: {
+        hero: {
+          reviewStatus: "Approved",
+          favorite: false,
+          rating: 4,
+          tags: ["winner"],
+          notes: "keep",
+          updatedAt: "2026-07-30T00:00:00.000Z",
+          futurePerItem: { score: 42 },
+        },
+      },
+    };
+    await writeFile(storePath, JSON.stringify(future));
+
+    await expect(
+      saveAnnotations(fixture.rootPath, await loadAnnotations(fixture.rootPath)),
+    ).rejects.toThrow(/newer annotation schema/i);
+    await expect(updateAnnotations(fixture.rootPath, {
+      hero: {
+        reviewStatus: "Reject",
+        favorite: false,
+        rating: 0,
+        tags: [],
+        notes: "replace",
+      },
+    })).rejects.toThrow(/newer annotation schema/i);
+    expect(JSON.parse(await readFile(storePath, "utf8"))).toEqual(future);
+  });
+
   test("updates one annotation without dropping existing entries", async () => {
     fixture = await makeLibraryFixture();
     await writeFile(

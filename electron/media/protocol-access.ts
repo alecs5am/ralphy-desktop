@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { resolveContainedPath, validateLibraryRoot } from "./catalog";
-import type { MediaKind, ProjectScanResult } from "./types";
+import type {
+  MediaKind,
+  ProjectScanResult,
+  TrashResult,
+} from "./types";
 
 const PREVIEWABLE_KINDS = new Set<MediaKind>(["image", "video", "audio", "pdf"]);
 const DEFAULT_MAX_ASSET_BYTES = 8 * 1024 * 1024 * 1024;
@@ -38,7 +42,8 @@ export class MediaProtocolAccess {
   }
 
   async mint(rootPath: string, requestedPath: string): Promise<string> {
-    const path = await this.#validate(rootPath, requestedPath);
+    const path = await this.resolveFile(rootPath, requestedPath);
+    await this.#validatePreview(path);
     const existing = this.#tokensByPath.get(path);
     if (existing) return existing;
 
@@ -57,19 +62,64 @@ export class MediaProtocolAccess {
   async resolve(rootPath: string, token: string): Promise<string> {
     const path = this.#pathsByToken.get(token);
     if (!path) throw new Error("Unknown media token");
-    return this.#validate(rootPath, path);
+    const resolved = await this.resolveFile(rootPath, path);
+    await this.#validatePreview(resolved);
+    return resolved;
   }
 
-  async #validate(rootPath: string, requestedPath: string): Promise<string> {
+  async resolveFile(
+    rootPath: string,
+    requestedPath: unknown,
+    allowedKinds?: readonly MediaKind[],
+  ): Promise<string> {
+    if (
+      typeof requestedPath !== "string"
+      || !requestedPath
+      || requestedPath.length > 4096
+    ) {
+      throw new Error("Invalid selected project file path");
+    }
     const root = await validateLibraryRoot(rootPath);
     if (root !== this.#rootPath) throw new Error("Media scan is no longer active");
-    const path = await resolveContainedPath(rootPath, requestedPath);
+    const path = await resolveContainedPath(rootPath, requestedPath).catch(() => {
+      throw new Error("Path is not selected project media");
+    });
     const kind = this.#allowedPaths.get(path);
     if (!kind) throw new Error("Path is not selected project media");
-    if (!PREVIEWABLE_KINDS.has(kind)) throw new Error("Unsupported media kind");
+    if (allowedKinds && !allowedKinds.includes(kind)) {
+      throw new Error("Unsupported selected project file type");
+    }
     const info = await lstat(path);
     if (!info.isFile() || info.isSymbolicLink()) throw new Error("Media path is not a regular file");
-    if (info.size > this.#maxAssetBytes) throw new Error("Media exceeds the size limit");
     return path;
   }
+
+  async #validatePreview(path: string): Promise<void> {
+    const kind = this.#allowedPaths.get(path);
+    if (!kind || !PREVIEWABLE_KINDS.has(kind)) throw new Error("Unsupported media kind");
+    const info = await lstat(path);
+    if (info.size > this.#maxAssetBytes) throw new Error("Media exceeds the size limit");
+  }
+}
+
+export async function trashAuthorizedItems(
+  rootPath: string,
+  paths: string[],
+  access: MediaProtocolAccess,
+  trashItem: (path: string) => Promise<void>,
+): Promise<TrashResult> {
+  const result: TrashResult = { trashed: [], failed: [] };
+  for (const path of paths) {
+    try {
+      const authorizedPath = await access.resolveFile(rootPath, path);
+      await trashItem(authorizedPath);
+      result.trashed.push(authorizedPath);
+    } catch (error) {
+      result.failed.push({
+        path,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return result;
 }

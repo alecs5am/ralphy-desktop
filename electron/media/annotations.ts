@@ -30,6 +30,12 @@ const REVIEW_STATUSES = new Set<ReviewStatus>([
 ]);
 const writes = new Map<string, Promise<unknown>>();
 
+function assertWritableVersion(version: number): void {
+  if (version > CURRENT_VERSION) {
+    throw new Error(`Cannot write newer annotation schema version ${version}`);
+  }
+}
+
 export function validateAnnotationUpdates(
   value: unknown,
 ): Record<string, AnnotationInput> {
@@ -168,6 +174,7 @@ export async function saveAnnotations(
   rootPath: string,
   value: AnnotationStore,
 ): Promise<AnnotationStore> {
+  assertWritableVersion(value.version);
   const normalized = normalizeStore(value);
   const { root, directory, store } = await paths(rootPath);
   await ensureStoreDirectory(root, directory);
@@ -210,6 +217,7 @@ export async function updateAnnotations(
   const previous = writes.get(root) ?? Promise.resolve();
   const next = previous.catch(() => undefined).then(async () => {
     const current = await loadAnnotations(root);
+    assertWritableVersion(current.version);
     const updatedAt = new Date().toISOString();
     for (const [id, annotation] of Object.entries(updates)) {
       if (!id) continue;

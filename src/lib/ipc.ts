@@ -10,6 +10,7 @@ import type {
   MediaKind,
   MediaWorkbenchBridge,
   ProjectReference,
+  ProjectScanQuery,
   ProjectScanResult,
   ProjectSummary,
   WorkspaceSummary,
@@ -29,6 +30,7 @@ export type {
   MediaQueryOptions,
   MediaWorkbenchBridge,
   ProjectReference,
+  ProjectScanQuery,
   ProjectScanProgress,
   ProjectScanResult,
   ProjectSummary,
@@ -119,7 +121,7 @@ const mockWorkspaces: WorkspaceSummary[] = [
 
 const mockProjects: ProjectSummary[] = [
   {
-    id: "coffee-grinder-001",
+    id: "launch-studio/coffee-grinder-001",
     workspaceId: "launch-studio",
     projectId: "coffee-grinder-001",
     name: "Arc Grinder Launch",
@@ -137,7 +139,7 @@ const mockProjects: ProjectSummary[] = [
     recentActivity: "2026-07-30T09:42:00.000Z",
   },
   {
-    id: "skin-set-004",
+    id: "launch-studio/skin-set-004",
     workspaceId: "launch-studio",
     projectId: "skin-set-004",
     name: "Night Set Unboxing",
@@ -155,7 +157,7 @@ const mockProjects: ProjectSummary[] = [
     recentActivity: "2026-07-29T16:21:00.000Z",
   },
   {
-    id: "trail-shoe-002",
+    id: "launch-studio/trail-shoe-002",
     workspaceId: "launch-studio",
     projectId: "trail-shoe-002",
     name: "Trail Shoe Macro",
@@ -306,7 +308,10 @@ function createMockBridge(): RalphyBridge {
     async openLibrary() {
       return openResult();
     },
-    async scanProject(project: ProjectReference): Promise<ProjectScanResult> {
+    async scanProject(
+      project: ProjectReference,
+      _options?: ProjectScanQuery,
+    ): Promise<ProjectScanResult> {
       const result: ProjectScanResult = {
         rootPath: MOCK_ROOT,
         ...project,

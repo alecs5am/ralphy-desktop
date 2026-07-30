@@ -11,7 +11,11 @@ import {
   resolve,
   sep,
 } from "node:path";
-import { resolveProjectPath, validateLibraryRoot } from "./catalog";
+import {
+  resolveContainedPath,
+  resolveProjectPath,
+  validateLibraryRoot,
+} from "./catalog";
 import type {
   GenerationAttribution,
   GenerationLedgerResult,
@@ -26,7 +30,23 @@ import type {
 const DEFAULT_LEDGER_LINE_BYTES = 256 * 1024;
 const DEFAULT_LEDGER_BYTES = 64 * 1024 * 1024;
 const DEFAULT_LEDGER_ENTRIES = 100_000;
+const DEFAULT_PROGRESS_FILES = 100;
+const DEFAULT_PROGRESS_INTERVAL_MS = 100;
 const LEDGER_CACHE_SIZE = 8;
+const INTERMEDIATE_DIRECTORIES = new Set([
+  ".cache",
+  ".git",
+  ".next",
+  "__pycache__",
+  "build",
+  "cache",
+  "coverage",
+  "dist",
+  "node_modules",
+  "temp",
+  "tmp",
+  "vendor",
+]);
 
 const IMAGE_EXTENSIONS = new Set([".avif", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".webp"]);
 const VIDEO_EXTENSIONS = new Set([".m4v", ".mkv", ".mov", ".mp4", ".webm"]);
@@ -85,6 +105,9 @@ export interface ProjectScanOptions {
   maxLedgerLineBytes?: number;
   maxLedgerBytes?: number;
   maxLedgerEntries?: number;
+  includeIntermediate?: boolean;
+  progressEveryFiles?: number;
+  progressIntervalMs?: number;
 }
 
 function throwIfCancelled(signal?: AbortSignal): void {
@@ -102,6 +125,19 @@ function mediaKind(extension: string): MediaKind {
   if (extension === ".pdf") return "pdf";
   if (TEXT_EXTENSIONS.has(extension)) return "text";
   return "other";
+}
+
+function isIntermediatePath(projectRelativePath: string): boolean {
+  const parts = projectRelativePath.toLowerCase().split("/");
+  return parts.some((part, index) => (
+    part.startsWith(".")
+    || INTERMEDIATE_DIRECTORIES.has(part)
+    || (
+      index === 1
+      && parts[0] === "render"
+      && /^work(?:-|$)/.test(part)
+    )
+  ));
 }
 
 export function classifyRalphyEntity(projectRelativePath: string): MediaEntity {
@@ -225,7 +261,22 @@ async function readGenerationLedger(
   maxEntries: number,
   signal?: AbortSignal,
 ): Promise<{ result: GenerationLedgerResult; byPath: Map<string, GenerationAttribution> }> {
-  const path = join(projectPath, "logs", "generations.jsonl");
+  const path = await resolveContainedPath(
+    rootPath,
+    join(projectPath, "logs", "generations.jsonl"),
+  ).catch(() => null);
+  if (!path) {
+    return {
+      result: {
+        entries: [],
+        totalCostUsd: 0,
+        malformedLineCount: 0,
+        oversizedLineCount: 0,
+        truncated: false,
+      },
+      byPath: new Map(),
+    };
+  }
   const info = await lstat(path).catch(() => null);
   if (!info?.isFile() || info.isSymbolicLink()) {
     return {
@@ -394,8 +445,42 @@ export async function scanProject(
   );
   const items: MediaItem[] = [];
   const pendingDirectories = [projectPath];
+  const includeIntermediate = options.includeIntermediate
+    ?? request.includeIntermediate
+    ?? false;
+  const progressEveryFiles = Math.max(
+    1,
+    Math.floor(options.progressEveryFiles ?? DEFAULT_PROGRESS_FILES),
+  );
+  const progressIntervalMs = Math.max(
+    1,
+    Math.floor(options.progressIntervalMs ?? DEFAULT_PROGRESS_INTERVAL_MS),
+  );
   let filesScanned = 0;
   let bytesScanned = 0;
+  let lastProgressFiles = 0;
+  let lastProgressAt = Date.now();
+  const reportProgress = (force = false): void => {
+    if (!options.onProgress || filesScanned === 0 || filesScanned === lastProgressFiles) return;
+    const now = Date.now();
+    if (
+      !force
+      && filesScanned !== 1
+      && filesScanned - lastProgressFiles < progressEveryFiles
+      && now - lastProgressAt < progressIntervalMs
+    ) {
+      return;
+    }
+    lastProgressFiles = filesScanned;
+    lastProgressAt = now;
+    options.onProgress({
+      workspaceId: request.workspaceId,
+      projectId: request.projectId,
+      generation: request.generation,
+      filesScanned,
+      bytesScanned,
+    });
+  };
 
   while (pendingDirectories.length > 0) {
     throwIfCancelled(options.signal);
@@ -410,6 +495,8 @@ export async function scanProject(
       throwIfCancelled(options.signal);
       if (entry.isSymbolicLink()) continue;
       const absolutePath = join(directory, entry.name);
+      const projectRelativePath = toProjectPath(relative(projectPath, absolutePath));
+      if (!includeIntermediate && isIntermediatePath(projectRelativePath)) continue;
       if (entry.isDirectory()) {
         pendingDirectories.push(absolutePath);
         continue;
@@ -417,7 +504,6 @@ export async function scanProject(
       if (!entry.isFile()) continue;
       const info = await lstat(absolutePath);
       if (!info.isFile() || info.isSymbolicLink()) continue;
-      const projectRelativePath = toProjectPath(relative(projectPath, absolutePath));
       const extension = extname(entry.name).toLowerCase();
       filesScanned += 1;
       bytesScanned += info.size;
@@ -435,17 +521,12 @@ export async function scanProject(
         modifiedAt: info.mtime.toISOString(),
         generation: byPath.get(projectRelativePath) ?? null,
       });
-      options.onProgress?.({
-        workspaceId: request.workspaceId,
-        projectId: request.projectId,
-        generation: request.generation,
-        filesScanned,
-        bytesScanned,
-      });
+      reportProgress();
       throwIfCancelled(options.signal);
     }
   }
 
+  reportProgress(true);
   items.sort((left, right) => left.projectRelativePath.localeCompare(right.projectRelativePath));
   return {
     rootPath,

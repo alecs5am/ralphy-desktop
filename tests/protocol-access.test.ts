@@ -1,7 +1,10 @@
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { MediaProtocolAccess } from "../electron/media/protocol-access";
+import {
+  MediaProtocolAccess,
+  trashAuthorizedItems,
+} from "../electron/media/protocol-access";
 import { scanProject } from "../electron/media/project-scanner";
 import { makeLibraryFixture, type LibraryFixture } from "./fixtures";
 
@@ -64,5 +67,66 @@ describe("media protocol access", () => {
     const mediaPath = join(fixture.alphaPath, "artifacts", "images", "hero.png");
     await writeFile(mediaPath, "x".repeat(9));
     await expect(access.mint(fixture.rootPath, mediaPath)).rejects.toThrow(/size limit/i);
+  });
+
+  test("authorizes file actions only for regular files in the current scan", async () => {
+    fixture = await makeLibraryFixture();
+    const access = new MediaProtocolAccess();
+    const result = await scanProject({
+      rootPath: fixture.rootPath,
+      workspaceId: "studio",
+      projectId: "alpha-001",
+      generation: 1,
+    });
+    access.replace(result);
+    const brief = join(fixture.alphaPath, "BRIEF.md");
+
+    await expect(access.resolveFile(fixture.rootPath, brief, ["text"])).resolves.toMatch(/BRIEF\.md$/);
+    await expect(
+      access.resolveFile(fixture.rootPath, join(fixture.rootPath, "registry.json")),
+    ).rejects.toThrow(/selected project/i);
+    await expect(
+      access.resolveFile(fixture.rootPath, join(fixture.rootPath, "media-library", "library.json")),
+    ).rejects.toThrow(/selected project/i);
+    await expect(
+      access.resolveFile(fixture.rootPath, join(fixture.rootPath, "workspaces", "studio")),
+    ).rejects.toThrow(/selected project/i);
+    await expect(
+      access.resolveFile(fixture.rootPath, join(fixture.betaPath, "artifacts", "videos", "beta.mp4")),
+    ).rejects.toThrow(/selected project/i);
+    await expect(access.resolveFile(fixture.rootPath, "")).rejects.toThrow(/path/i);
+    await expect(access.resolveFile(fixture.rootPath, "x".repeat(4097))).rejects.toThrow(/path/i);
+    await expect(
+      access.resolveFile(fixture.rootPath, join(fixture.alphaPath, "misc.bin"), ["text"]),
+    ).rejects.toThrow(/file type/i);
+  });
+
+  test("reports partial Trash failures without invoking Trash for unauthorized paths", async () => {
+    fixture = await makeLibraryFixture();
+    const access = new MediaProtocolAccess();
+    access.replace(await scanProject({
+      rootPath: fixture.rootPath,
+      workspaceId: "studio",
+      projectId: "alpha-001",
+      generation: 1,
+    }));
+    const trashed: string[] = [];
+    const registry = join(fixture.rootPath, "registry.json");
+    const inactive = join(fixture.betaPath, "artifacts", "videos", "beta.mp4");
+    const selected = join(fixture.alphaPath, "misc.bin");
+
+    const result = await trashAuthorizedItems(
+      fixture.rootPath,
+      [registry, inactive, selected],
+      access,
+      async (path) => {
+        trashed.push(path);
+      },
+    );
+
+    expect(trashed).toHaveLength(1);
+    expect(trashed[0]).toMatch(/misc\.bin$/);
+    expect(result.trashed).toEqual(trashed);
+    expect(result.failed.map((failure) => failure.path)).toEqual([registry, inactive]);
   });
 });

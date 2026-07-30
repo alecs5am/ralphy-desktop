@@ -68,15 +68,19 @@ export class LibraryWatcher {
   #catalogTimer: ReturnType<typeof setTimeout> | null = null;
   #projectTimer: ReturnType<typeof setTimeout> | null = null;
   #rootPath = "";
+  #lifecycleGeneration = 0;
 
   constructor(options: LibraryWatcherOptions) {
     this.#options = options;
   }
 
-  async start(): Promise<void> {
+  async start(): Promise<boolean> {
     this.close();
+    const lifecycleGeneration = this.#lifecycleGeneration;
     this.#rootPath = await validateLibraryRoot(this.#options.rootPath);
+    if (lifecycleGeneration !== this.#lifecycleGeneration) return false;
     const handle = (basePath: string, filename: string | Buffer | null): void => {
+      if (lifecycleGeneration !== this.#lifecycleGeneration) return;
       const changedPath = filename ? join(basePath, filename.toString()) : basePath;
       const route = routeLibraryChange(
         this.#rootPath,
@@ -103,9 +107,11 @@ export class LibraryWatcher {
     );
     workspaceWatcher.on("error", onError);
     this.#watchers = [rootWatcher, workspaceWatcher];
+    return true;
   }
 
   close(): void {
+    this.#lifecycleGeneration += 1;
     for (const watcher of this.#watchers) watcher.close();
     this.#watchers = [];
     if (this.#catalogTimer) clearTimeout(this.#catalogTimer);

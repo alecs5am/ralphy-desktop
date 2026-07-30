@@ -34,7 +34,10 @@ describe("shallow library catalog", () => {
       unitCount: 1,
       finalCount: 1,
     });
-    expect(result.projects.map((project) => project.id)).toEqual(["alpha-001", "beta-001"]);
+    expect(result.projects.map((project) => project.id)).toEqual([
+      "studio/alpha-001",
+      "studio/beta-001",
+    ]);
     expect(result.projects[0]).toMatchObject({
       name: "Alpha Launch",
       platform: "instagram",
@@ -58,7 +61,10 @@ describe("shallow library catalog", () => {
     const result = await buildShallowCatalog(fixture.rootPath);
 
     expect(result.workspaces[0]).toMatchObject({ id: "studio", name: "studio", projectCount: 2 });
-    expect(result.projects.map((project) => project.id)).toEqual(["alpha-001", "beta-001"]);
+    expect(result.projects.map((project) => project.id)).toEqual([
+      "studio/alpha-001",
+      "studio/beta-001",
+    ]);
   });
 
   test("does not follow registry metadata symlinks outside the library", async () => {
@@ -74,7 +80,49 @@ describe("shallow library catalog", () => {
 
     const result = await buildShallowCatalog(fixture.rootPath);
 
-    expect(result.projects.find((project) => project.id === "alpha-001")?.name).toBe("alpha-001");
+    expect(
+      result.projects.find((project) => project.projectId === "alpha-001")?.name,
+    ).toBe("alpha-001");
+  });
+
+  test("uses workspace and project identity for colliding registry ids", async () => {
+    fixture = await makeLibraryFixture();
+    const agencyProject = join(
+      fixture.rootPath,
+      "workspaces",
+      "agency",
+      "projects",
+      "alpha-001",
+    );
+    await mkdir(agencyProject, { recursive: true });
+    await writeFile(
+      join(fixture.rootPath, "registry.json"),
+      JSON.stringify({
+        projects: {
+          "studio-alpha": {
+            id: "alpha-001",
+            workspace: "studio",
+            name: "Studio Alpha",
+          },
+          "agency-alpha": {
+            id: "alpha-001",
+            workspace: "agency",
+            name: "Agency Alpha",
+          },
+        },
+      }),
+    );
+
+    const result = await buildShallowCatalog(fixture.rootPath);
+
+    expect(
+      result.projects.find((project) => project.workspaceId === "studio"
+        && project.projectId === "alpha-001"),
+    ).toMatchObject({ id: "studio/alpha-001", name: "Studio Alpha" });
+    expect(
+      result.projects.find((project) => project.workspaceId === "agency"
+        && project.projectId === "alpha-001"),
+    ).toMatchObject({ id: "agency/alpha-001", name: "Agency Alpha" });
   });
 });
 

@@ -5,14 +5,15 @@ import {
   type MediaEvent,
   type MediaWorkbenchBridge,
   type ProjectReference,
+  type ProjectScanQuery,
 } from "./media/types";
 
 const mediaBridge: MediaWorkbenchBridge = {
   chooseLibrary: () => ipcRenderer.invoke(MEDIA_CHANNELS.chooseLibrary),
   restoreLibrary: () => ipcRenderer.invoke(MEDIA_CHANNELS.restoreLibrary),
   openLibrary: (rootPath) => ipcRenderer.invoke(MEDIA_CHANNELS.openLibrary, rootPath),
-  scanProject: (project: ProjectReference) => (
-    ipcRenderer.invoke(MEDIA_CHANNELS.scanProject, project)
+  scanProject: (project: ProjectReference, options?: ProjectScanQuery) => (
+    ipcRenderer.invoke(MEDIA_CHANNELS.scanProject, project, options)
   ),
   cancelProjectScan: () => ipcRenderer.invoke(MEDIA_CHANNELS.cancelProjectScan),
   onMediaEvent(callback: (event: MediaEvent) => void) {
