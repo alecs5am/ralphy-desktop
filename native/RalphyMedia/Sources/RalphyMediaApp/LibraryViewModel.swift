@@ -193,6 +193,22 @@ final class LibraryViewModel: ObservableObject {
         didSet { appSettings.inspectorVisible = inspectorVisible }
     }
 
+    @Published var workspacePresentationSort: WorkspaceSortOption {
+        didSet { appSettings.workspacePresentationSort = workspacePresentationSort }
+    }
+
+    @Published var projectPresentationSort: ProjectSortOption {
+        didSet { appSettings.projectPresentationSort = projectPresentationSort }
+    }
+
+    @Published private(set) var pinnedWorkspaceIDs: Set<String> {
+        didSet { appSettings.pinnedWorkspaceIDs = pinnedWorkspaceIDs }
+    }
+
+    @Published private(set) var pinnedProjectIDs: Set<ProjectReference> {
+        didSet { appSettings.pinnedProjectIDs = pinnedProjectIDs }
+    }
+
     struct LibraryContext: Sendable {
         let root: URL
         var annotations: [String: MediaAnnotation]
@@ -417,6 +433,10 @@ final class LibraryViewModel: ObservableObject {
         gridSize = settings.gridSize
         includeIntermediates = settings.includeIntermediates
         inspectorVisible = settings.inspectorVisible
+        workspacePresentationSort = settings.workspacePresentationSort
+        projectPresentationSort = settings.projectPresentationSort
+        pinnedWorkspaceIDs = settings.pinnedWorkspaceIDs
+        pinnedProjectIDs = settings.pinnedProjectIDs
         requestVisibleItemsUpdate()
     }
 
@@ -450,6 +470,18 @@ final class LibraryViewModel: ObservableObject {
 
     var projectSummaries: [ProjectSummary] {
         selectedWorkspaceID.map(catalog.projects(in:)) ?? []
+    }
+
+    var selectedWorkspaceSummary: WorkspaceSummary? {
+        selectedWorkspaceID.flatMap { id in
+            catalog.workspaces.first(where: { $0.id == id })
+        }
+    }
+
+    var selectedProjectSummary: ProjectSummary? {
+        selectedProjectReference.flatMap { project in
+            catalog.projects(in: project.workspaceID).first(where: { $0.id == project })
+        }
     }
 
     var workspaces: [(String, Int)] {
@@ -584,6 +616,22 @@ final class LibraryViewModel: ObservableObject {
 
     func count(for verdict: ReviewVerdict) -> Int {
         sourceCounts.count(for: verdict)
+    }
+
+    func toggleWorkspacePin(_ id: String) {
+        if pinnedWorkspaceIDs.contains(id) {
+            pinnedWorkspaceIDs.remove(id)
+        } else {
+            pinnedWorkspaceIDs.insert(id)
+        }
+    }
+
+    func toggleProjectPin(_ id: ProjectReference) {
+        if pinnedProjectIDs.contains(id) {
+            pinnedProjectIDs.remove(id)
+        } else {
+            pinnedProjectIDs.insert(id)
+        }
     }
 
     func enterWorkspace(_ id: String) {

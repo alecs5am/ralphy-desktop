@@ -22,6 +22,8 @@ struct AppSettings {
         static let pinnedWorkspaceIDs = "pinnedWorkspaceIDs"
         static let pinnedProjectIDs = "pinnedProjectIDs"
         static let sidebarWidth = "sidebarWidth"
+        static let workspacePresentationSort = "workspacePresentationSort"
+        static let projectPresentationSort = "projectPresentationSort"
     }
 
     private let defaults: UserDefaults
@@ -162,6 +164,26 @@ struct AppSettings {
             return defaults.double(forKey: Key.sidebarWidth)
         }
         nonmutating set { defaults.set(newValue, forKey: Key.sidebarWidth) }
+    }
+
+    var workspacePresentationSort: WorkspaceSortOption {
+        get {
+            defaults.string(forKey: Key.workspacePresentationSort)
+                .flatMap(WorkspaceSortOption.init(rawValue:)) ?? .recent
+        }
+        nonmutating set {
+            defaults.set(newValue.rawValue, forKey: Key.workspacePresentationSort)
+        }
+    }
+
+    var projectPresentationSort: ProjectSortOption {
+        get {
+            defaults.string(forKey: Key.projectPresentationSort)
+                .flatMap(ProjectSortOption.init(rawValue:)) ?? .recent
+        }
+        nonmutating set {
+            defaults.set(newValue.rawValue, forKey: Key.projectPresentationSort)
+        }
     }
 
     private func storedSet<Value: Decodable>(forKey key: String) -> Set<Value> {

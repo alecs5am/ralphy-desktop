@@ -3,22 +3,31 @@ import SwiftUI
 
 struct InspectorView: View {
     @ObservedObject var viewModel: LibraryViewModel
-    @ObservedObject var thumbnailStore: ThumbnailStore
     @State private var tagText = ""
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: RalphyTheme.Spacing.large) {
                 if let item = viewModel.primarySelection {
-                    MediaPreview(
-                        item: item,
-                        thumbnailStore: thumbnailStore
-                    )
-                        .frame(height: 250)
-
                     VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: RalphyTheme.Spacing.small) {
+                            Label(
+                                ProjectPresentation.entityLabel(item.entity),
+                                systemImage: ProjectPresentation.entitySymbol(item.entity)
+                            )
+                            .foregroundStyle(RalphyTheme.focus)
+                            Spacer()
+                            Text(viewModel.annotation(for: item).verdict.displayName)
+                                .foregroundStyle(
+                                    inspectorVerdictColor(
+                                        viewModel.annotation(for: item).verdict
+                                    )
+                                )
+                        }
+                        .font(.system(size: 10, weight: .medium))
+
                         Text(item.filename)
-                            .font(.headline)
+                            .font(.system(size: 14, weight: .semibold))
                             .lineLimit(2)
                             .textSelection(.enabled)
                         if viewModel.selectedItems.count > 1 {
@@ -27,8 +36,8 @@ struct InspectorView: View {
                                 .foregroundStyle(.secondary)
                         } else {
                             Text(item.relativePath)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(RalphyTheme.secondaryText)
                                 .lineLimit(2)
                                 .truncationMode(.middle)
                                 .textSelection(.enabled)
@@ -51,10 +60,11 @@ struct InspectorView: View {
                     .frame(maxWidth: .infinity, minHeight: 320)
                 }
             }
-            .padding(14)
+            .padding(RalphyTheme.Spacing.large)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .inspectorColumnWidth(min: 290, ideal: 340, max: 430)
+        .background(RalphyTheme.sidebar)
+        .foregroundStyle(RalphyTheme.primaryText)
+        .inspectorColumnWidth(min: 300, ideal: 340, max: 420)
         .onChange(of: viewModel.selectedIDs) {
             tagText = ""
         }
@@ -78,7 +88,7 @@ struct InspectorView: View {
                         .tag(Optional(verdict))
                 }
             }
-            .pickerStyle(.segmented)
+            .pickerStyle(.menu)
             .accessibilityLabel("Verdict for selected files")
 
             HStack(spacing: 7) {
@@ -102,7 +112,7 @@ struct InspectorView: View {
                         )
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(.yellow)
+                    .foregroundStyle(RalphyTheme.amber)
                     .help("Set Rating to \(rating)")
                     .accessibilityLabel("Set rating to \(rating) of 5")
                 }
@@ -254,6 +264,15 @@ private struct SelectionProperties: View {
                     propertyRow("Workspace", item.workspace)
                     propertyRow("Project", item.project)
                     propertyRow("Type", item.bucket.rawValue.capitalized)
+                    propertyRow(
+                        "Entity",
+                        ProjectPresentation.entityLabel(item.entity)
+                    )
+                    propertyRow(
+                        "Cost",
+                        ProjectPresentation.spendLabel(item.generation?.costUSD),
+                        monospaced: true
+                    )
                     if let createdAt = item.createdAt {
                         propertyRow(
                             "Created",
@@ -272,15 +291,29 @@ private struct SelectionProperties: View {
         }
     }
 
-    private func propertyRow(_ label: String, _ value: String) -> some View {
+    private func propertyRow(
+        _ label: String,
+        _ value: String,
+        monospaced: Bool = false
+    ) -> some View {
         GridRow {
             Text(label)
                 .foregroundStyle(.secondary)
             Text(value)
+                .fontDesign(monospaced ? .monospaced : .default)
                 .lineLimit(2)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
         }
+    }
+}
+
+private func inspectorVerdictColor(_ verdict: ReviewVerdict) -> Color {
+    switch verdict {
+    case .unreviewed: RalphyTheme.secondaryText
+    case .keep: RalphyTheme.approved
+    case .maybe, .needsWork: RalphyTheme.amber
+    case .reject: RalphyTheme.rejected
     }
 }
 

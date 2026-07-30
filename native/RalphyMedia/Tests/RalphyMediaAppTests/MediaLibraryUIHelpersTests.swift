@@ -136,6 +136,128 @@ func sourceCountsAggregateSmartWorkspaceAndProjectCountsOnce() {
     #expect(counts.projects(in: nil).map(\.1) == [2, 1])
 }
 
+@Test
+func recentProjectsSortNewestThenNameWithPinsFirst() {
+    let recent = Date(timeIntervalSince1970: 300)
+    let older = Date(timeIntervalSince1970: 100)
+    let projects = [
+        ProjectPresentationFixture(
+            id: ProjectReference(workspaceID: "ws", projectID: "older-b"),
+            name: "Older B",
+            phase: .brief,
+            lastActivityAt: older
+        ),
+        ProjectPresentationFixture(
+            id: ProjectReference(workspaceID: "ws", projectID: "newest"),
+            name: "Newest",
+            phase: .render,
+            lastActivityAt: recent
+        ),
+        ProjectPresentationFixture(
+            id: ProjectReference(workspaceID: "ws", projectID: "older-a"),
+            name: "Older A",
+            phase: .plan,
+            lastActivityAt: older
+        ),
+    ]
+
+    let sorted = ProjectPresentation.sorted(
+        projects,
+        by: .recent,
+        pinned: [projects[0].id]
+    )
+
+    #expect(sorted.map(\.id.projectID) == ["older-b", "newest", "older-a"])
+}
+
+@Test
+func workspaceSortingSupportsRecentNameAndProjectCount() {
+    let older = Date(timeIntervalSince1970: 100)
+    let newer = Date(timeIntervalSince1970: 200)
+    let workspaces = [
+        WorkspacePresentationFixture(
+            id: "zeta",
+            name: "Zeta",
+            projectCount: 2,
+            lastActivityAt: older
+        ),
+        WorkspacePresentationFixture(
+            id: "alpha",
+            name: "Alpha",
+            projectCount: 8,
+            lastActivityAt: newer
+        ),
+    ]
+
+    #expect(
+        WorkspacePresentation.sorted(workspaces, by: .recent, pinned: []).map(\.id)
+            == ["alpha", "zeta"]
+    )
+    #expect(
+        WorkspacePresentation.sorted(workspaces, by: .name, pinned: []).map(\.id)
+            == ["alpha", "zeta"]
+    )
+    #expect(
+        WorkspacePresentation.sorted(workspaces, by: .projectCount, pinned: []).map(\.id)
+            == ["alpha", "zeta"]
+    )
+}
+
+@Test
+func presentationLabelsAreHumanReadableAndNeverInventUnknownSpend() {
+    let now = Date(timeIntervalSince1970: 10_000)
+
+    #expect(WorkspacePresentation.activityDescription(nil, now: now) == "No activity")
+    #expect(
+        WorkspacePresentation.activityDescription(
+            now.addingTimeInterval(-7_200),
+            now: now
+        ) == "2h ago"
+    )
+    #expect(ProjectPresentation.phaseLabel(.postmortem) == "Postmortem")
+    #expect(ProjectPresentation.spendLabel(nil) == "Cost not indexed")
+    #expect(ProjectPresentation.spendLabel(0) == "No charge")
+    #expect(ProjectPresentation.spendLabel(1.25) == "$1.25")
+}
+
+@Test
+func projectModesMapRalphyEntitiesAndNameEveryVisibleFilter() {
+    #expect(ProjectPresentation.mode(for: .finalRender) == .finals)
+    #expect(ProjectPresentation.mode(for: .generatedAsset) == .assets)
+    #expect(ProjectPresentation.mode(for: .reference) == .refs)
+    #expect(ProjectPresentation.mode(for: .unit) == .units)
+    #expect(ProjectPresentation.mode(for: .lifecycleDocument) == .files)
+    #expect(ProjectPresentation.mode(for: .productionFile) == .files)
+
+    let text = ProjectPresentation.filterSummary(
+        mode: .assets,
+        bucket: .video,
+        verdict: .keep,
+        sort: .newest,
+        group: .entity,
+        includesIntermediates: true,
+        gridSize: 220
+    )
+
+    #expect(
+        text == "Assets · Video · Approved · Newest · Entity · Intermediates · Grid 220"
+    )
+}
+
+private struct WorkspacePresentationFixture: WorkspacePresentable {
+    let id: String
+    let name: String
+    let projectCount: Int
+    let lastActivityAt: Date?
+}
+
+private struct ProjectPresentationFixture: ProjectPresentable {
+    let id: ProjectReference
+    let name: String
+    let phase: ProjectPhase
+    let lastActivityAt: Date?
+}
+
 private func mediaItem(
     id: String = "same-path",
     relativePath: String = "workspaces/one/projects/alpha/image.png",

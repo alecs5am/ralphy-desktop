@@ -9,21 +9,16 @@ struct LibraryWindow: View {
     var body: some View {
         NavigationSplitView {
             SidebarView(viewModel: viewModel)
-                .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 260)
+                .navigationSplitViewColumnWidth(min: 250, ideal: 280, max: 320)
         } detail: {
             VStack(spacing: 0) {
-                MediaGridView(
-                    viewModel: viewModel,
-                    thumbnailStore: thumbnailStore
-                )
+                detailSurface
                 LibraryStatusStrip(viewModel: viewModel)
             }
+            .background(RalphyTheme.canvas)
         }
-        .inspector(isPresented: $viewModel.inspectorVisible) {
-            InspectorView(
-                viewModel: viewModel,
-                thumbnailStore: thumbnailStore
-            )
+        .inspector(isPresented: inspectorPresented) {
+            InspectorView(viewModel: viewModel)
         }
         .toolbar {
             LibraryToolbar(viewModel: viewModel)
@@ -56,6 +51,21 @@ struct LibraryWindow: View {
         .disabled(viewModel.isTerminating)
     }
 
+    @ViewBuilder
+    private var detailSurface: some View {
+        switch viewModel.route {
+        case .library:
+            LibraryDashboardView(viewModel: viewModel)
+        case .workspace:
+            WorkspaceDashboardView(viewModel: viewModel)
+        case .project, .asset:
+            ProjectSurfaceView(
+                viewModel: viewModel,
+                thumbnailStore: thumbnailStore
+            )
+        }
+    }
+
     private var quickLookSelection: Binding<URL?> {
         Binding(
             get: { viewModel.quickLookURL },
@@ -63,6 +73,19 @@ struct LibraryWindow: View {
                 if url == nil {
                     viewModel.clearQuickLook()
                 }
+            }
+        )
+    }
+
+    private var inspectorPresented: Binding<Bool> {
+        Binding(
+            get: {
+                viewModel.selectedProjectReference != nil
+                    && viewModel.inspectorVisible
+            },
+            set: { presented in
+                guard viewModel.selectedProjectReference != nil else { return }
+                viewModel.inspectorVisible = presented
             }
         )
     }
@@ -99,6 +122,19 @@ private struct LibraryToolbar: ToolbarContent {
     @ObservedObject var viewModel: LibraryViewModel
 
     var body: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            if viewModel.route != .library {
+                Button {
+                    viewModel.goBack()
+                } label: {
+                    Label("Back", systemImage: "chevron.left")
+                }
+                .labelStyle(.iconOnly)
+                .help("Back")
+                .accessibilityLabel("Back")
+            }
+        }
+
         ToolbarItemGroup(placement: .primaryAction) {
             Button {
                 viewModel.pickLibrary()
@@ -109,77 +145,6 @@ private struct LibraryToolbar: ToolbarContent {
             .help("Choose .ralphy Library")
             .accessibilityLabel("Choose .ralphy library")
 
-            TextField("Search", text: $viewModel.searchText)
-                .textFieldStyle(.roundedBorder)
-                .frame(minWidth: 150, idealWidth: 220, maxWidth: 280)
-                .accessibilityLabel("Search media")
-
-            Menu {
-                Picker("Media Type", selection: $viewModel.selectedBucket) {
-                    Text("All Types").tag(MediaBucket?.none)
-                    ForEach(MediaBucket.allCases, id: \.self) { bucket in
-                        Text(bucket.rawValue.capitalized)
-                            .tag(Optional(bucket))
-                    }
-                }
-            } label: {
-                Label("Media Type", systemImage: "line.3.horizontal.decrease")
-            }
-            .labelStyle(.iconOnly)
-            .help("Filter by Media Type")
-            .accessibilityLabel("Filter by media type")
-
-            Menu {
-                Picker("Sort", selection: Binding(
-                    get: { viewModel.query.sort },
-                    set: { viewModel.query.sort = $0 }
-                )) {
-                    Text("Name").tag(MediaSort.name)
-                    Text("Newest").tag(MediaSort.newest)
-                    Text("Oldest").tag(MediaSort.oldest)
-                }
-            } label: {
-                Label("Sort", systemImage: "arrow.up.arrow.down")
-            }
-            .labelStyle(.iconOnly)
-            .help("Sort")
-            .accessibilityLabel("Sort media")
-
-            Menu {
-                Picker("Group", selection: Binding(
-                    get: { viewModel.query.group },
-                    set: { viewModel.query.group = $0 }
-                )) {
-                    Text("None").tag(MediaGroup.none)
-                    Text("Workspace").tag(MediaGroup.workspace)
-                    Text("Project").tag(MediaGroup.project)
-                    Text("Type").tag(MediaGroup.type)
-                }
-            } label: {
-                Label("Group", systemImage: "square.stack.3d.up")
-            }
-            .labelStyle(.iconOnly)
-            .help("Group")
-            .accessibilityLabel("Group media")
-
-            Toggle(isOn: $viewModel.includeIntermediates) {
-                Label("Include Intermediates", systemImage: "shippingbox")
-            }
-            .toggleStyle(.button)
-            .labelStyle(.iconOnly)
-            .help("Include Intermediate Files")
-            .accessibilityLabel("Include intermediate files")
-
-            HStack(spacing: 6) {
-                Image(systemName: "square.grid.3x3")
-                    .accessibilityHidden(true)
-                Slider(value: $viewModel.gridSize, in: 120...320, step: 10)
-                    .frame(width: 110)
-                    .accessibilityLabel("Grid item size")
-                Image(systemName: "square.grid.2x2")
-                    .accessibilityHidden(true)
-            }
-
             Toggle(isOn: $viewModel.inspectorVisible) {
                 Label("Inspector", systemImage: "sidebar.right")
             }
@@ -187,6 +152,7 @@ private struct LibraryToolbar: ToolbarContent {
             .labelStyle(.iconOnly)
             .help("Show or Hide Inspector")
             .accessibilityLabel("Show or hide inspector")
+            .disabled(viewModel.selectedProjectReference == nil)
         }
     }
 }

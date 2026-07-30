@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import RalphyMediaCore
 import SwiftUI
 
@@ -52,11 +53,11 @@ struct MediaGridView: View {
                                 minimum: viewModel.gridSize,
                                 maximum: viewModel.gridSize * 1.35
                             ),
-                            spacing: 12
+                            spacing: RalphyTheme.Spacing.large
                         ),
                     ],
                     alignment: .leading,
-                    spacing: 16,
+                    spacing: RalphyTheme.Spacing.xLarge,
                     pinnedViews: [.sectionHeaders]
                 ) {
                     ForEach(viewModel.visibleSections) { section in
@@ -107,13 +108,13 @@ struct MediaGridView: View {
                                     Spacer()
                                 }
                                 .padding(.vertical, 5)
-                                .background(.bar)
+                                .background(RalphyTheme.sidebar)
                                 .accessibilityElement(children: .combine)
                             }
                         }
                     }
                 }
-                .padding(14)
+                .padding(RalphyTheme.Spacing.large)
             }
             .background {
                 GeometryReader { geometry in
@@ -129,7 +130,7 @@ struct MediaGridView: View {
                         }
                 }
             }
-            .background(Color(nsColor: .underPageBackgroundColor))
+            .background(RalphyTheme.canvas)
             .focusable()
             .focused($gridIsFocused)
             .onMoveCommand { direction in
@@ -146,22 +147,12 @@ struct MediaGridView: View {
                 viewModel.clearSelection()
             }
             .overlay {
-                if viewModel.isScanning && viewModel.rootURL == nil {
-                    ProgressView("Scanning Library")
+                if viewModel.isLoadingProject, viewModel.items.isEmpty {
+                    ProgressView("Loading project")
                         .controlSize(.small)
-                } else if viewModel.rootURL == nil {
-                    ContentUnavailableView {
-                        Label("No Library Selected", systemImage: "folder")
-                    } description: {
-                        Text("Choose a .ralphy folder to begin.")
-                    } actions: {
-                        Button("Choose Library") {
-                            viewModel.pickLibrary()
-                        }
-                    }
                 } else if viewModel.visibleItems.isEmpty {
                     ContentUnavailableView(
-                        "No Matching Files",
+                        "No Matching Project Files",
                         systemImage: "line.3.horizontal.decrease.circle"
                     )
                 }
@@ -279,9 +270,7 @@ struct LibraryStatusStrip: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            Text("\(viewModel.visibleItems.count) visible")
-            Text("\(viewModel.items.count) total")
-            Text("\(viewModel.selectedIDs.count) selected")
+            statusSummary
             Spacer(minLength: 12)
             if let progress = viewModel.trashProgress {
                 ProgressView(
@@ -296,20 +285,49 @@ struct LibraryStatusStrip: View {
                     .controlSize(.mini)
                     .accessibilityLabel("Scanning")
             }
-            Text(viewModel.statusText)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            if showsStatusText {
+                Text(viewModel.statusText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
         }
         .font(.caption)
-        .foregroundStyle(.secondary)
-        .monospacedDigit()
+        .foregroundStyle(RalphyTheme.secondaryText)
         .padding(.horizontal, 10)
         .frame(height: 26)
-        .background(.bar)
+        .background(RalphyTheme.sidebar)
         .overlay(alignment: .top) {
             Divider()
         }
         .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private var statusSummary: some View {
+        switch viewModel.route {
+        case .library:
+            Text("\(viewModel.workspaceSummaries.count) workspaces")
+            Text(
+                "\(viewModel.workspaceSummaries.reduce(0) { $0 + $1.projectCount }) projects"
+            )
+        case .workspace:
+            Text("\(viewModel.projectSummaries.count) projects")
+        case .project, .asset:
+            Text("\(viewModel.visibleItems.count) visible")
+            Text("\(viewModel.items.count) total")
+            Text("\(viewModel.selectedIDs.count) selected")
+        }
+    }
+
+    private var showsStatusText: Bool {
+        switch viewModel.route {
+        case .library:
+            viewModel.isLoadingCatalog
+        case .workspace:
+            false
+        case .project, .asset:
+            true
+        }
     }
 }
 
@@ -319,6 +337,7 @@ private struct MediaTile: View {
     let selected: Bool
     let requestedWidth: CGFloat
     @ObservedObject var thumbnailStore: ThumbnailStore
+    @State private var duration: TimeInterval?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -332,23 +351,26 @@ private struct MediaTile: View {
                     thumbnailStore: thumbnailStore
                 )
 
-                if !item.fileExtension.isEmpty {
-                    Text(item.fileExtension.uppercased())
-                        .font(.caption2.weight(.semibold))
+                Label(
+                    ProjectPresentation.entityLabel(item.entity),
+                    systemImage: ProjectPresentation.entitySymbol(item.entity)
+                )
+                        .font(.system(size: 9, weight: .semibold))
                         .lineLimit(1)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
-                        .foregroundStyle(.white)
-                        .background(.black.opacity(0.58))
-                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                        .foregroundStyle(RalphyTheme.primaryText)
+                        .background(RalphyTheme.sidebar.opacity(0.9))
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: RalphyTheme.Radius.small)
+                        )
                         .padding(5)
                         .accessibilityHidden(true)
-                }
 
                 HStack(spacing: 5) {
                     if annotation.favorite {
                         Image(systemName: "star.fill")
-                            .foregroundStyle(.yellow)
+                            .foregroundStyle(RalphyTheme.focus)
                     }
                     Image(systemName: verdictSymbol(annotation.verdict))
                         .foregroundStyle(verdictColor(annotation.verdict))
@@ -367,7 +389,7 @@ private struct MediaTile: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 5) {
-                Text(item.project)
+                Text(annotation.verdict.displayName)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 4)
@@ -380,22 +402,45 @@ private struct MediaTile: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
             .frame(height: 14)
+
+            HStack(spacing: 5) {
+                if let duration {
+                    Text(durationLabel(duration))
+                        .fontDesign(.monospaced)
+                } else {
+                    Text(item.fileExtension.uppercased())
+                }
+                Spacer(minLength: 4)
+                Text(ProjectPresentation.spendLabel(item.generation?.costUSD))
+                    .fontDesign(.monospaced)
+                    .foregroundStyle(
+                        item.generation == nil
+                            ? RalphyTheme.secondaryText
+                            : RalphyTheme.amber
+                    )
+            }
+            .font(.system(size: 9.5))
+            .foregroundStyle(RalphyTheme.secondaryText)
+            .frame(height: 14)
         }
         .padding(5)
-        .background(selected ? Color.accentColor.opacity(0.14) : .clear)
+        .background(selected ? RalphyTheme.selectedRow : RalphyTheme.raised)
         .overlay {
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: RalphyTheme.Radius.medium)
                 .stroke(
-                    selected ? Color.accentColor : Color(nsColor: .separatorColor),
+                    selected ? RalphyTheme.focus : RalphyTheme.divider,
                     lineWidth: selected ? 2 : 1
                 )
         }
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: RalphyTheme.Radius.medium))
         .contentShape(Rectangle())
         .help(item.relativePath)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+        .task(id: durationRequestID) {
+            duration = await mediaDuration(for: item)
+        }
     }
 
     private var accessibilityLabel: String {
@@ -408,7 +453,19 @@ private struct MediaTile: View {
         if annotation.favorite {
             parts.append("favorite")
         }
+        if let duration {
+            parts.append("duration \(durationLabel(duration))")
+        }
+        if let cost = item.generation?.costUSD {
+            parts.append("cost \(ProjectPresentation.spendLabel(cost))")
+        } else {
+            parts.append("cost not indexed")
+        }
         return parts.joined(separator: ", ")
+    }
+
+    private var durationRequestID: String {
+        "\(item.id)|\(item.modifiedAt?.timeIntervalSince1970 ?? 0)|\(item.sizeBytes)"
     }
 }
 
@@ -419,7 +476,6 @@ private struct ThumbnailView: View {
 
     @Environment(\.displayScale) private var displayScale
     @State private var image: NSImage?
-    @State private var loadTask: Task<Void, Never>?
 
     var body: some View {
         Rectangle()
@@ -436,13 +492,15 @@ private struct ThumbnailView: View {
                 }
             }
             .clipped()
-            .onAppear(perform: load)
-            .onChange(of: requestID) {
-                load()
-            }
-            .onDisappear {
-                loadTask?.cancel()
-                loadTask = nil
+            .task(id: requestID) {
+                image = nil
+                let loaded = await thumbnailStore.thumbnail(
+                    for: item,
+                    size: requestedSize,
+                    scale: displayScale
+                )
+                guard !Task.isCancelled else { return }
+                image = loaded
             }
             .accessibilityHidden(true)
     }
@@ -451,19 +509,6 @@ private struct ThumbnailView: View {
         "\(item.id)|\(item.modifiedAt?.timeIntervalSince1970 ?? 0)|\(item.sizeBytes)|\(requestedSize.width)|\(displayScale)"
     }
 
-    private func load() {
-        loadTask?.cancel()
-        image = nil
-        loadTask = Task {
-            let loaded = await thumbnailStore.thumbnail(
-                for: item,
-                size: requestedSize,
-                scale: displayScale
-            )
-            guard !Task.isCancelled else { return }
-            image = loaded
-        }
-    }
 }
 
 private func symbol(for bucket: MediaBucket) -> String {
@@ -489,10 +534,32 @@ private func verdictSymbol(_ verdict: ReviewVerdict) -> String {
 
 private func verdictColor(_ verdict: ReviewVerdict) -> Color {
     switch verdict {
-    case .unreviewed: .secondary
-    case .keep: .green
-    case .maybe: .orange
-    case .needsWork: .orange
-    case .reject: .red
+    case .unreviewed: RalphyTheme.secondaryText
+    case .keep: RalphyTheme.approved
+    case .maybe: RalphyTheme.focus
+    case .needsWork: RalphyTheme.amber
+    case .reject: RalphyTheme.rejected
     }
+}
+
+private func mediaDuration(for item: MediaItem) async -> TimeInterval? {
+    guard item.bucket == .video || item.bucket == .audio else { return nil }
+    do {
+        let duration = try await AVURLAsset(url: item.url).load(.duration).seconds
+        guard duration.isFinite, duration > 0, !Task.isCancelled else { return nil }
+        return duration
+    } catch {
+        return nil
+    }
+}
+
+private func durationLabel(_ duration: TimeInterval) -> String {
+    let totalSeconds = Int(duration.rounded())
+    let hours = totalSeconds / 3_600
+    let minutes = (totalSeconds % 3_600) / 60
+    let seconds = totalSeconds % 60
+    if hours > 0 {
+        return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+    }
+    return String(format: "%d:%02d", minutes, seconds)
 }

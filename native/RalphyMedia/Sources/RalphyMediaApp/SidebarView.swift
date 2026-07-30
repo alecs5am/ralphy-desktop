@@ -3,121 +3,376 @@ import SwiftUI
 
 struct SidebarView: View {
     @ObservedObject var viewModel: LibraryViewModel
+    @State private var workspaceSearch = ""
+    @State private var projectSearch = ""
 
     var body: some View {
-        List(selection: selection) {
-            Section("Smart Filters") {
-                sourceRow(
-                    "All",
-                    symbol: "square.grid.2x2",
-                    count: viewModel.items.count
-                )
-                .tag(LibrarySmartSource.all)
-                sourceRow(
-                    "Usable",
-                    symbol: "checkmark.seal",
-                    count: viewModel.items.count - viewModel.count(for: .reject)
-                )
-                .tag(LibrarySmartSource.usable)
-                sourceRow(
-                    "Unreviewed",
-                    symbol: "circle",
-                    count: viewModel.count(for: .unreviewed)
-                )
-                .tag(LibrarySmartSource.verdict(.unreviewed))
-                sourceRow(
-                    "Keep",
-                    symbol: "checkmark.circle",
-                    count: viewModel.count(for: .keep)
-                )
-                .tag(LibrarySmartSource.verdict(.keep))
-                sourceRow(
-                    "Maybe",
-                    symbol: "questionmark.circle",
-                    count: viewModel.count(for: .maybe)
-                )
-                .tag(LibrarySmartSource.verdict(.maybe))
-                sourceRow(
-                    "Reject",
-                    symbol: "xmark.circle",
-                    count: viewModel.count(for: .reject)
-                )
-                .tag(LibrarySmartSource.verdict(.reject))
-                sourceRow(
-                    "Favorites",
-                    symbol: "star",
-                    count: viewModel.favoriteCount
-                )
-                .tag(LibrarySmartSource.favorites)
-            }
+        VStack(spacing: 0) {
+            sidebarHeader
+            Divider().overlay(RalphyTheme.divider)
+            searchAndSort
+            Divider().overlay(RalphyTheme.divider)
 
-            if !viewModel.workspaces.isEmpty {
-                Section("Workspaces") {
-                    ForEach(viewModel.workspaces, id: \.0) { workspace, count in
-                        sourceRow(workspace, symbol: "externaldrive", count: count)
-                            .tag(LibrarySmartSource.workspace(workspace))
+            ScrollView {
+                LazyVStack(spacing: RalphyTheme.Spacing.xSmall) {
+                    if showsProjects {
+                        projectRows
+                    } else {
+                        workspaceRows
                     }
                 }
+                .padding(.horizontal, RalphyTheme.Spacing.medium)
+                .padding(.vertical, RalphyTheme.Spacing.medium)
             }
 
-            if !viewModel.projects.isEmpty {
-                Section("Projects") {
-                    ForEach(viewModel.projects, id: \.0) { project, count in
-                        sourceRow(project, symbol: "folder", count: count)
-                            .tag(LibrarySmartSource.project(project))
-                    }
+            Divider().overlay(RalphyTheme.divider)
+            libraryFooter
+        }
+        .background(RalphyTheme.sidebar)
+        .foregroundStyle(RalphyTheme.primaryText)
+        .navigationTitle("")
+    }
+
+    private var showsProjects: Bool {
+        viewModel.selectedWorkspaceID != nil
+    }
+
+    private var sidebarHeader: some View {
+        HStack(spacing: RalphyTheme.Spacing.small) {
+            if showsProjects {
+                Button {
+                    viewModel.goBack()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .frame(width: 20, height: 20)
                 }
+                .buttonStyle(.plain)
+                .help("Back")
+                .accessibilityLabel("Back")
+            } else {
+                Image(systemName: "film.stack")
+                    .foregroundStyle(RalphyTheme.focus)
+                    .accessibilityHidden(true)
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(viewModel.selectedWorkspaceSummary?.name ?? "Ralphy")
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1)
+                Text(showsProjects ? "Projects" : "Workspaces")
+                    .font(.system(size: 11))
+                    .foregroundStyle(RalphyTheme.secondaryText)
+            }
+
+            Spacer(minLength: RalphyTheme.Spacing.small)
+
+            if viewModel.isLoadingCatalog {
+                ProgressView()
+                    .controlSize(.mini)
+                    .accessibilityLabel("Loading workspace catalog")
             }
         }
-        .listStyle(.sidebar)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        .padding(.horizontal, RalphyTheme.Spacing.large)
+        .frame(height: 48)
+    }
+
+    private var searchAndSort: some View {
+        VStack(spacing: RalphyTheme.Spacing.small) {
+            TextField(
+                showsProjects ? "Search projects" : "Search workspaces",
+                text: showsProjects ? $projectSearch : $workspaceSearch
+            )
+            .textFieldStyle(.roundedBorder)
+            .controlSize(.small)
+            .accessibilityLabel(showsProjects ? "Search projects" : "Search workspaces")
+
+            HStack(spacing: RalphyTheme.Spacing.small) {
+                Text(showsProjects ? "Project list" : "Workspace list")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(RalphyTheme.secondaryText)
+                Spacer()
+                sortMenu
+            }
+            .frame(height: 20)
+        }
+        .padding(.horizontal, RalphyTheme.Spacing.medium)
+        .padding(.vertical, RalphyTheme.Spacing.medium)
+    }
+
+    @ViewBuilder
+    private var sortMenu: some View {
+        if showsProjects {
+            Menu {
+                Picker("Project sort", selection: $viewModel.projectPresentationSort) {
+                    ForEach(ProjectSortOption.allCases, id: \.self) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+            } label: {
+                Label(
+                    viewModel.projectPresentationSort.label,
+                    systemImage: "arrow.up.arrow.down"
+                )
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .accessibilityLabel("Project sort: \(viewModel.projectPresentationSort.label)")
+        } else {
+            Menu {
+                Picker("Workspace sort", selection: $viewModel.workspacePresentationSort) {
+                    ForEach(WorkspaceSortOption.allCases, id: \.self) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+            } label: {
+                Label(
+                    viewModel.workspacePresentationSort.label,
+                    systemImage: "arrow.up.arrow.down"
+                )
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .accessibilityLabel(
+                "Workspace sort: \(viewModel.workspacePresentationSort.label)"
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var workspaceRows: some View {
+        let workspaces = WorkspacePresentation.sorted(
+            viewModel.workspaceSummaries.filter { workspace in
+                matchesWorkspaceSearch(workspace)
+            },
+            by: viewModel.workspacePresentationSort,
+            pinned: viewModel.pinnedWorkspaceIDs
+        )
+        if workspaces.isEmpty {
+            SidebarEmptyState(
+                title: workspaceSearch.isEmpty ? "No workspaces" : "No matches",
+                symbol: "square.stack.3d.up.slash"
+            )
+        } else {
+            ForEach(workspaces) { workspace in
+                Button {
+                    viewModel.enterWorkspace(workspace.id)
+                } label: {
+                    WorkspaceSidebarRow(
+                        workspace: workspace,
+                        pinned: viewModel.pinnedWorkspaceIDs.contains(workspace.id)
+                    )
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    Button(
+                        viewModel.pinnedWorkspaceIDs.contains(workspace.id)
+                            ? "Unpin Workspace"
+                            : "Pin Workspace",
+                        systemImage: viewModel.pinnedWorkspaceIDs.contains(workspace.id)
+                            ? "pin.slash"
+                            : "pin"
+                    ) {
+                        viewModel.toggleWorkspacePin(workspace.id)
+                    }
+                }
+                .accessibilityLabel(
+                    "\(workspace.name), \(workspace.projectCount) projects, " +
+                        WorkspacePresentation.activityDescription(workspace.lastActivityAt)
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var projectRows: some View {
+        let projects = ProjectPresentation.sorted(
+            viewModel.projectSummaries.filter { project in
+                matchesProjectSearch(project)
+            },
+            by: viewModel.projectPresentationSort,
+            pinned: viewModel.pinnedProjectIDs
+        )
+        if projects.isEmpty {
+            SidebarEmptyState(
+                title: projectSearch.isEmpty ? "No projects" : "No matches",
+                symbol: "folder.badge.questionmark"
+            )
+        } else {
+            ForEach(projects) { project in
+                let selected = viewModel.selectedProjectReference == project.id
+                Button {
+                    viewModel.enterProject(project.id)
+                } label: {
+                    ProjectSidebarRow(
+                        project: project,
+                        pinned: viewModel.pinnedProjectIDs.contains(project.id),
+                        selected: selected,
+                        spend: selected
+                            ? viewModel.projectSpendUSD ?? project.knownSpendUSD
+                            : project.knownSpendUSD
+                    )
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    Button(
+                        viewModel.pinnedProjectIDs.contains(project.id)
+                            ? "Unpin Project"
+                            : "Pin Project",
+                        systemImage: viewModel.pinnedProjectIDs.contains(project.id)
+                            ? "pin.slash"
+                            : "pin"
+                    ) {
+                        viewModel.toggleProjectPin(project.id)
+                    }
+                }
+                .accessibilityLabel(
+                    "\(project.name), \(ProjectPresentation.phaseLabel(project.phase)), " +
+                        WorkspacePresentation.activityDescription(project.lastActivityAt)
+                )
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+    }
+
+    private var libraryFooter: some View {
+        HStack(spacing: RalphyTheme.Spacing.medium) {
             if let root = viewModel.rootURL {
                 Text(root.path)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(RalphyTheme.secondaryText)
+                    .lineLimit(1)
                     .truncationMode(.middle)
                     .textSelection(.enabled)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.bar)
                     .accessibilityLabel("Library path \(root.path)")
+            } else {
+                Text("No library selected")
+                    .font(.system(size: 11))
+                    .foregroundStyle(RalphyTheme.secondaryText)
             }
+            Spacer(minLength: RalphyTheme.Spacing.small)
+            Button {
+                viewModel.pickLibrary()
+            } label: {
+                Image(systemName: "folder.badge.plus")
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
+            .help("Choose .ralphy Library")
+            .accessibilityLabel("Choose .ralphy library")
         }
-        .navigationTitle("Ralphy Media")
+        .padding(.horizontal, RalphyTheme.Spacing.large)
+        .frame(height: 38)
     }
 
-    private var selection: Binding<LibrarySmartSource?> {
-        Binding(
-            get: { viewModel.selectedSource },
-            set: { source in
-                guard let source else { return }
-                viewModel.applySource(source)
+    private func matchesWorkspaceSearch(_ workspace: WorkspaceSummary) -> Bool {
+        workspaceSearch.isEmpty
+            || workspace.name.localizedCaseInsensitiveContains(workspaceSearch)
+            || workspace.id.localizedCaseInsensitiveContains(workspaceSearch)
+    }
+
+    private func matchesProjectSearch(_ project: ProjectSummary) -> Bool {
+        projectSearch.isEmpty
+            || project.name.localizedCaseInsensitiveContains(projectSearch)
+            || project.id.projectID.localizedCaseInsensitiveContains(projectSearch)
+            || project.brief?.localizedCaseInsensitiveContains(projectSearch) == true
+    }
+}
+
+private struct WorkspaceSidebarRow: View {
+    let workspace: WorkspaceSummary
+    let pinned: Bool
+
+    var body: some View {
+        HStack(spacing: RalphyTheme.Spacing.medium) {
+            Image(systemName: "square.stack.3d.up")
+                .font(.system(size: 12))
+                .foregroundStyle(RalphyTheme.secondaryText)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: RalphyTheme.Spacing.xSmall) {
+                    Text(workspace.name)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                    if pinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 8))
+                            .foregroundStyle(RalphyTheme.focus)
+                            .accessibilityHidden(true)
+                    }
+                }
+                HStack(spacing: RalphyTheme.Spacing.small) {
+                    Text("\(workspace.projectCount) projects")
+                    Text(WorkspacePresentation.activityDescription(workspace.lastActivityAt))
+                }
+                .font(.system(size: 10))
+                .foregroundStyle(RalphyTheme.secondaryText)
+                .lineLimit(1)
             }
-        )
+            Spacer(minLength: RalphyTheme.Spacing.xSmall)
+        }
+        .padding(.horizontal, RalphyTheme.Spacing.medium)
+        .frame(minHeight: 38)
+        .contentShape(Rectangle())
     }
+}
 
-    private func sourceRow(
-        _ title: String,
-        symbol: String,
-        count: Int
-    ) -> some View {
-        Label {
-            HStack(spacing: 6) {
-                Text(title)
+private struct ProjectSidebarRow: View {
+    let project: ProjectSummary
+    let pinned: Bool
+    let selected: Bool
+    let spend: Double?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: RalphyTheme.Spacing.xSmall) {
+                Image(systemName: project.hasFinalRender ? "checkered.flag" : "folder")
+                    .font(.system(size: 11))
+                    .foregroundStyle(project.hasFinalRender ? RalphyTheme.approved : RalphyTheme.secondaryText)
+                    .frame(width: 15)
+                Text(project.name)
+                    .font(.system(size: 13, weight: selected ? .semibold : .regular))
                     .lineLimit(1)
-                Spacer(minLength: 4)
-                Text(count, format: .number)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
+                Spacer(minLength: RalphyTheme.Spacing.xSmall)
+                if pinned {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 8))
+                        .foregroundStyle(RalphyTheme.focus)
+                        .accessibilityHidden(true)
+                }
             }
-        } icon: {
-            Image(systemName: symbol)
+            HStack(spacing: RalphyTheme.Spacing.small) {
+                Text(ProjectPresentation.phaseLabel(project.phase))
+                    .foregroundStyle(RalphyTheme.amber)
+                Text(WorkspacePresentation.activityDescription(project.lastActivityAt))
+                Spacer(minLength: RalphyTheme.Spacing.xSmall)
+                Text(ProjectPresentation.spendLabel(spend))
+                    .fontDesign(.monospaced)
+            }
+            .font(.system(size: 9.5))
+            .foregroundStyle(RalphyTheme.secondaryText)
+            .lineLimit(1)
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title), \(count) files")
+        .padding(.horizontal, RalphyTheme.Spacing.medium)
+        .frame(minHeight: 42)
+        .background(selected ? RalphyTheme.selectedRow : .clear)
+        .overlay {
+            RoundedRectangle(cornerRadius: RalphyTheme.Radius.medium)
+                .stroke(selected ? RalphyTheme.focus : .clear, lineWidth: 1)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: RalphyTheme.Radius.medium))
+        .contentShape(Rectangle())
     }
+}
 
+private struct SidebarEmptyState: View {
+    let title: String
+    let symbol: String
+
+    var body: some View {
+        Label(title, systemImage: symbol)
+            .font(.system(size: 12))
+            .foregroundStyle(RalphyTheme.secondaryText)
+            .frame(maxWidth: .infinity, minHeight: 72)
+            .accessibilityLabel(title)
+    }
 }
