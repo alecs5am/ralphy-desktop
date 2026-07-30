@@ -177,6 +177,41 @@ export function columnCountForWidth(
   return Math.max(1, Math.floor((Math.max(0, width) + gap) / (targetTileWidth + gap)));
 }
 
+export interface AssetGridGeometry {
+  columns: number;
+  tileWidth: number;
+  tileHeight: number;
+  rowHeight: number;
+  gap: number;
+}
+
+export function assetGridGeometry(
+  width: number,
+  targetTileWidth: number,
+  gap: number,
+): AssetGridGeometry {
+  const safeWidth = Math.max(1, Number.isFinite(width) ? width : 1);
+  const safeGap = Math.max(0, Number.isFinite(gap) ? gap : 0);
+  const columns = columnCountForWidth(
+    safeWidth,
+    Math.max(1, Number.isFinite(targetTileWidth) ? targetTileWidth : 1),
+    safeGap,
+  );
+  const tileWidth = Math.max(
+    1,
+    (safeWidth - safeGap * (columns - 1)) / columns,
+  );
+  const previewHeight = Math.max(1, tileWidth * 0.625);
+  const tileHeight = previewHeight + 54;
+  return {
+    columns,
+    tileWidth,
+    tileHeight,
+    rowHeight: tileHeight + safeGap,
+    gap: safeGap,
+  };
+}
+
 type PreviewKind = "image" | "video";
 
 export function createPreviewScheduler(limits: Record<PreviewKind, number>) {

@@ -4,8 +4,11 @@ import {
   Folder,
   FolderOpen,
   MoreHorizontal,
+  PanelBottom,
+  PanelLeft,
   PanelRight,
 } from "lucide-react";
+import { motion } from "motion/react";
 import { useState } from "react";
 
 interface SidebarChromeProps {
@@ -13,6 +16,7 @@ interface SidebarChromeProps {
   canGoForward: boolean;
   onBack(): void;
   onForward(): void;
+  onToggleSidebar(): void;
 }
 
 export function SidebarChrome({
@@ -20,10 +24,23 @@ export function SidebarChrome({
   canGoForward,
   onBack,
   onForward,
+  onToggleSidebar,
 }: SidebarChromeProps) {
   return (
     <div className="sidebar-chrome">
-      <div className="sidebar-traffic-space" aria-hidden="true" />
+      <div className="sidebar-chrome-leading">
+        <div className="sidebar-traffic-space" aria-hidden="true" />
+        <button
+          className="icon-button"
+          type="button"
+          title="Hide sidebar"
+          aria-label="Toggle sidebar"
+          aria-pressed="true"
+          onClick={onToggleSidebar}
+        >
+          <PanelLeft size={16} strokeWidth={1.5} />
+        </button>
+      </div>
       <nav className="history-controls" aria-label="Navigation history">
         <button
           className="icon-button"
@@ -52,24 +69,73 @@ export function SidebarChrome({
 
 interface MainHeaderProps {
   breadcrumbs: string[];
-  canToggleInspector: boolean;
-  inspectorVisible: boolean;
+  sidebarVisible: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  rightPanelVisible: boolean;
+  bottomPanelVisible: boolean;
   showChooseLibrary: boolean;
+  onBack(): void;
+  onForward(): void;
+  onToggleSidebar(): void;
   onChooseLibrary(): void;
-  onToggleInspector(): void;
+  onToggleRightPanel(): void;
+  onToggleBottomPanel(): void;
 }
 
 export function MainHeader({
   breadcrumbs,
-  canToggleInspector,
-  inspectorVisible,
+  sidebarVisible,
+  canGoBack,
+  canGoForward,
+  rightPanelVisible,
+  bottomPanelVisible,
   showChooseLibrary,
+  onBack,
+  onForward,
+  onToggleSidebar,
   onChooseLibrary,
-  onToggleInspector,
+  onToggleRightPanel,
+  onToggleBottomPanel,
 }: MainHeaderProps) {
   const [actionsOpen, setActionsOpen] = useState(false);
   return (
-    <header className="main-header">
+    <motion.header className="main-header" layout>
+      {!sidebarVisible && (
+        <div className="collapsed-window-controls">
+          <div className="main-traffic-space" aria-hidden="true" />
+          <button
+            className="icon-button"
+            type="button"
+            title="Show sidebar"
+            aria-label="Toggle sidebar"
+            aria-pressed="false"
+            onClick={onToggleSidebar}
+          >
+            <PanelLeft size={16} strokeWidth={1.5} />
+          </button>
+          <button
+            className="icon-button"
+            type="button"
+            title="Back"
+            aria-label="Back"
+            disabled={!canGoBack}
+            onClick={onBack}
+          >
+            <ArrowLeft size={16} strokeWidth={1.5} />
+          </button>
+          <button
+            className="icon-button"
+            type="button"
+            title="Forward"
+            aria-label="Forward"
+            disabled={!canGoForward}
+            onClick={onForward}
+          >
+            <ArrowRight size={16} strokeWidth={1.5} />
+          </button>
+        </div>
+      )}
       <Folder size={16} strokeWidth={1.5} aria-hidden="true" />
       <nav className="breadcrumbs" aria-label="Current location">
         {breadcrumbs.map((crumb, index) => (
@@ -121,17 +187,26 @@ export function MainHeader({
           </div>
         )}
         <button
-          className={`icon-button${inspectorVisible ? " is-active" : ""}`}
+          className={`icon-button${rightPanelVisible ? " is-active" : ""}`}
           type="button"
-          title="Toggle inspector"
-          aria-label="Toggle inspector"
-          aria-pressed={inspectorVisible}
-          disabled={!canToggleInspector}
-          onClick={onToggleInspector}
+          title="Toggle right panel"
+          aria-label="Toggle right panel"
+          aria-pressed={rightPanelVisible}
+          onClick={onToggleRightPanel}
         >
           <PanelRight size={16} strokeWidth={1.5} />
         </button>
+        <button
+          className={`icon-button${bottomPanelVisible ? " is-active" : ""}`}
+          type="button"
+          title="Toggle bottom panel"
+          aria-label="Toggle bottom panel"
+          aria-pressed={bottomPanelVisible}
+          onClick={onToggleBottomPanel}
+        >
+          <PanelBottom size={16} strokeWidth={1.5} />
+        </button>
       </div>
-    </header>
+    </motion.header>
   );
 }

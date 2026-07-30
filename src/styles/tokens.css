@@ -25,21 +25,21 @@
 :root {
   color-scheme: dark;
 
-  --canvas: #17171b;
-  --sunken: #101013;
-  --panel: rgb(28 28 34 / 0.56);
-  --panel-solid: #1d1d22;
-  --raised: #24242a;
-  --hover: #2c2c33;
-  --selected: #35353d;
-  --pressed: #3e3e48;
+  --canvas: #181818;
+  --sunken: #111111;
+  --panel: rgb(30 30 30 / 0.72);
+  --panel-solid: #202020;
+  --raised: #2d2d2d;
+  --hover: #343434;
+  --selected: #3a3a3a;
+  --pressed: #424242;
 
-  --fg: #f3f3f5;
-  --fg-2: #b3b3bb;
-  --fg-3: #8a8a93;
-  --fg-4: #6a6a74;
+  --fg: #f4f4f4;
+  --fg-2: #bebebe;
+  --fg-3: #929292;
+  --fg-4: #6c6c6c;
 
-  --accent: #6b8afd;
+  --accent: #8b7cf6;
   --accent-soft: color-mix(in srgb, var(--accent) 74%, #ffffff);
   --accent-fill: color-mix(in srgb, var(--accent) 20%, transparent);
   --accent-line: color-mix(in srgb, var(--accent) 38%, transparent);
@@ -63,10 +63,10 @@
   --leading-snug: 1.45;
   --leading-body: 1.55;
 
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
   --radius-pill: 999px;
 
   --control-sm: 26px;
@@ -95,7 +95,8 @@
 
   --ease: cubic-bezier(0.2, 0, 0.2, 1);
   --dur-fast: 90ms;
-  --dur: 140ms;
+  --dur: 160ms;
+  --dur-slow: 220ms;
 }
 
 @supports (corner-shape: squircle) {
@@ -119,6 +120,16 @@
   .status-dot,
   [style*="border-radius: 999px"] {
     corner-shape: round;
+  }
+
+  .asset-modal-surface,
+  .select-menu-content,
+  .select-menu-trigger,
+  .workspace-project-card,
+  .bottom-panel,
+  .utility-right-panel,
+  .profile-avatar {
+    corner-shape: squircle;
   }
 }
 

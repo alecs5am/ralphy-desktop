@@ -11,12 +11,18 @@ export type WorkbenchRoute =
   | { kind: "workspace"; workspaceId: string }
   | { kind: "project"; workspaceId: string; projectId: string };
 
+export type WorkspaceView = "grid" | "list";
+
 export interface WorkbenchPreferences {
   rootPath: string | null;
   workspaceId: string | null;
   projectId: string | null;
   pinnedWorkspaceIds: string[];
   pinnedProjectIds: string[];
+  sidebarVisible: boolean;
+  rightPanelVisible: boolean;
+  bottomPanelVisible: boolean;
+  workspaceView: WorkspaceView;
 }
 
 export interface WorkbenchState {
@@ -32,7 +38,7 @@ export interface WorkbenchState {
 }
 
 export type WorkbenchAction =
-  | { type: "library-opened"; catalog: CatalogResult }
+  | { type: "library-opened"; catalog: CatalogResult; workspaceId: string | null }
   | { type: "catalog-received"; catalog: CatalogResult }
   | { type: "open-library" }
   | { type: "open-workspace"; workspaceId: string }
@@ -81,22 +87,48 @@ function toggle(values: string[], value: string): string[] {
     : [...values, value];
 }
 
+function validRouteForCatalog(
+  route: WorkbenchRoute,
+  catalog: CatalogResult,
+): WorkbenchRoute {
+  const fallbackWorkspaceId = mostRecentWorkspaceId(catalog.workspaces);
+  const fallback: WorkbenchRoute = fallbackWorkspaceId
+    ? { kind: "workspace", workspaceId: fallbackWorkspaceId }
+    : { kind: "library" };
+  if (route.kind === "library") return fallback;
+  if (!catalog.workspaces.some((workspace) => workspace.id === route.workspaceId)) {
+    return fallback;
+  }
+  if (route.kind === "workspace") return route;
+  return catalog.projects.some(
+    (project) =>
+      project.workspaceId === route.workspaceId &&
+      project.projectId === route.projectId,
+  )
+    ? route
+    : { kind: "workspace", workspaceId: route.workspaceId };
+}
+
 export function workbenchReducer(
   state: WorkbenchState,
   action: WorkbenchAction,
 ): WorkbenchState {
   switch (action.type) {
-    case "library-opened":
+    case "library-opened": {
+      const route: WorkbenchRoute = action.workspaceId
+        ? { kind: "workspace", workspaceId: action.workspaceId }
+        : { kind: "library" };
       return {
         ...state,
-        route: { kind: "library" },
-        history: [{ kind: "library" }],
+        route,
+        history: [route],
         historyIndex: 0,
         catalog: action.catalog,
         catalogGeneration: action.catalog.generation,
         project: null,
         projectGeneration: -1,
       };
+    }
     case "catalog-received":
       if (action.catalog.generation < state.catalogGeneration) return state;
       {
@@ -105,16 +137,26 @@ export function workbenchReducer(
             project.spendUsd === null ? [] : [[project.id, project.spendUsd] as const]
           )),
         );
+        const catalog = {
+          ...action.catalog,
+          projects: action.catalog.projects.map((project) => ({
+            ...project,
+            spendUsd: project.spendUsd ?? scannedSpend.get(project.id) ?? null,
+          })),
+        };
+        const route = validRouteForCatalog(state.route, catalog);
+        const routeChanged = JSON.stringify(route) !== JSON.stringify(state.route);
         return {
           ...state,
-          catalog: {
-            ...action.catalog,
-            projects: action.catalog.projects.map((project) => ({
-              ...project,
-              spendUsd: project.spendUsd ?? scannedSpend.get(project.id) ?? null,
-            })),
-          },
+          route,
+          history: routeChanged
+            ? [...state.history.slice(0, state.historyIndex), route]
+            : state.history,
+          catalog,
           catalogGeneration: action.catalog.generation,
+          project: route.kind === "project" ? state.project : null,
+          projectGeneration:
+            route.kind === "project" ? state.projectGeneration : -1,
         };
       }
     case "open-library":
@@ -220,6 +262,12 @@ export function sortWorkspaces(
   return sortPinned(workspaces, pinnedIds);
 }
 
+export function mostRecentWorkspaceId(
+  workspaces: WorkspaceSummary[],
+): string | null {
+  return sortWorkspaces(workspaces, [])[0]?.id ?? null;
+}
+
 export function sortProjects(
   projects: ProjectSummary[],
   pinnedIds: string[],
@@ -245,6 +293,10 @@ export function readWorkbenchPreferences(storage: StorageLike): WorkbenchPrefere
     projectId: null,
     pinnedWorkspaceIds: [],
     pinnedProjectIds: [],
+    sidebarVisible: true,
+    rightPanelVisible: false,
+    bottomPanelVisible: false,
+    workspaceView: "grid",
   };
   try {
     const value = JSON.parse(storage.getItem(PREFERENCES_KEY) ?? "null") as unknown;
@@ -256,6 +308,13 @@ export function readWorkbenchPreferences(storage: StorageLike): WorkbenchPrefere
       projectId: typeof record.projectId === "string" ? record.projectId : null,
       pinnedWorkspaceIds: strings(record.pinnedWorkspaceIds),
       pinnedProjectIds: strings(record.pinnedProjectIds),
+      sidebarVisible:
+        typeof record.sidebarVisible === "boolean" ? record.sidebarVisible : true,
+      rightPanelVisible:
+        typeof record.rightPanelVisible === "boolean" ? record.rightPanelVisible : false,
+      bottomPanelVisible:
+        typeof record.bottomPanelVisible === "boolean" ? record.bottomPanelVisible : false,
+      workspaceView: record.workspaceView === "list" ? "list" : "grid",
     };
   } catch {
     return empty;

@@ -1,7 +1,14 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import type { MediaAnnotation, MediaItem } from "../lib/ipc";
-import { columnCountForWidth, type MediaGroupResult } from "../lib/media";
+import { assetGridGeometry, type MediaGroupResult } from "../lib/media";
 import { AssetTile } from "./AssetTile";
 
 interface VirtualAssetGridProps {
@@ -27,10 +34,9 @@ export function VirtualAssetGrid({
 }: VirtualAssetGridProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
-  const gap = 12;
-  const columns = columnCountForWidth(width, targetTileWidth, gap);
-  const tileWidth = (width - gap * (columns - 1)) / columns;
-  const tileHeight = tileWidth * 0.625 + 48;
+  const gap = 16;
+  const geometry = assetGridGeometry(width, targetTileWidth, gap);
+  const { columns } = geometry;
   const rows = useMemo<VirtualGridRow[]>(() => {
     const next: VirtualGridRow[] = [];
     for (const group of groups) {
@@ -56,13 +62,22 @@ export function VirtualAssetGrid({
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: (index) => rows[index]?.type === "heading" ? 34 : tileHeight + gap,
+    getItemKey: (index) => rows[index]?.key ?? index,
+    estimateSize: (index) =>
+      rows[index]?.type === "heading" ? 34 : geometry.rowHeight,
     overscan: 3,
   });
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
+    const measure = () => {
+      const style = window.getComputedStyle(element);
+      const horizontalPadding =
+        Number.parseFloat(style.paddingLeft) + Number.parseFloat(style.paddingRight);
+      setWidth(Math.max(1, element.clientWidth - horizontalPadding));
+    };
+    measure();
     const observer = new ResizeObserver(([entry]) => {
       setWidth(Math.max(1, entry.contentRect.width));
     });
@@ -70,7 +85,10 @@ export function VirtualAssetGrid({
     return () => observer.disconnect();
   }, []);
 
-  useEffect(() => virtualizer.measure(), [tileHeight, virtualizer]);
+  useEffect(
+    () => virtualizer.measure(),
+    [columns, geometry.rowHeight, virtualizer],
+  );
 
   if (rows.length === 0) {
     return (
@@ -93,13 +111,15 @@ export function VirtualAssetGrid({
             <div
               className={row.type === "heading" ? "virtual-group-heading" : "virtual-asset-row"}
               key={row.key}
-              ref={virtualizer.measureElement}
-              data-index={virtualRow.index}
               style={{
                 transform: `translateY(${virtualRow.start}px)`,
                 gridTemplateColumns:
                   row.type === "items" ? `repeat(${columns}, minmax(0, 1fr))` : undefined,
-              }}
+                height:
+                  row.type === "items" ? `${geometry.rowHeight}px` : "34px",
+                "--asset-tile-height": `${geometry.tileHeight}px`,
+                "--asset-row-gap": `${geometry.gap}px`,
+              } as CSSProperties}
             >
               {row.type === "heading" ? (
                 <>

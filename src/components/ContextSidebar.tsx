@@ -1,15 +1,13 @@
 import {
   Boxes,
-  ChevronDown,
   CircleDollarSign,
   Folder,
-  FolderKanban,
   FolderOpen,
-  Layers3,
   Pin,
   Search,
   UsersRound,
 } from "lucide-react";
+import { motion } from "motion/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ProjectSummary,
@@ -20,7 +18,9 @@ import {
   sortWorkspaces,
   type WorkbenchRoute,
 } from "../state/workbench";
+import { ProfileAvatar, profileIdentity } from "./ProfileAvatar";
 import { SidebarChrome } from "./Titlebar";
+import { SelectMenu } from "./ui/SelectMenu";
 
 interface ContextSidebarProps {
   route: WorkbenchRoute;
@@ -34,11 +34,10 @@ interface ContextSidebarProps {
   canGoForward: boolean;
   onBack(): void;
   onForward(): void;
+  onToggleSidebar(): void;
   onChooseLibrary(): void;
-  onOpenLibrary(): void;
   onOpenWorkspace(workspaceId: string): void;
   onOpenProject(project: ProjectSummary): void;
-  onToggleWorkspacePin(workspaceId: string): void;
   onToggleProjectPin(projectId: string): void;
 }
 
@@ -105,18 +104,18 @@ export function ContextSidebar({
   canGoForward,
   onBack,
   onForward,
+  onToggleSidebar,
   onChooseLibrary,
-  onOpenLibrary,
   onOpenWorkspace,
   onOpenProject,
-  onToggleWorkspacePin,
   onToggleProjectPin,
 }: ContextSidebarProps) {
   const [query, setQuery] = useState("");
   const [searchVisible, setSearchVisible] = useState(false);
   const [visibleLimit, setVisibleLimit] = useState(12);
   const searchRef = useRef<HTMLInputElement>(null);
-  const workspaceId = route.kind === "library" ? null : route.workspaceId;
+  const workspaceId =
+    route.kind === "library" ? workspaces[0]?.id ?? null : route.workspaceId;
   const workspace = workspaces.find((item) => item.id === workspaceId);
 
   useEffect(() => {
@@ -135,13 +134,9 @@ export function ContextSidebar({
     window.requestAnimationFrame(() => searchRef.current?.focus());
   }, [searchRequest]);
 
-  const visibleWorkspaces = useMemo(
-    () =>
-      sortWorkspaces(
-        workspaces.filter((item) => includesQuery(query, item.name, item.description)),
-        pinnedWorkspaceIds,
-      ),
-    [pinnedWorkspaceIds, query, workspaces],
+  const orderedWorkspaces = useMemo(
+    () => sortWorkspaces(workspaces, pinnedWorkspaceIds),
+    [pinnedWorkspaceIds, workspaces],
   );
   const visibleProjects = useMemo(
     () =>
@@ -155,32 +150,46 @@ export function ContextSidebar({
       ),
     [pinnedProjectIds, projects, query, workspaceId],
   );
-  const visibleItems = workspace ? visibleProjects : visibleWorkspaces;
+  const visibleItems = visibleProjects;
   const shownProjects = visibleProjects.slice(0, visibleLimit);
-  const shownWorkspaces = visibleWorkspaces.slice(0, visibleLimit);
   const contextName = workspace?.name ?? "Workspaces";
+  const identity = profileIdentity(rootPath);
 
   return (
-    <aside className="context-sidebar panel-blur">
+    <motion.aside
+      className="context-sidebar panel-blur"
+      initial={{ x: -20, opacity: 0 }}
+      animate={{ x: 0, opacity: 1 }}
+      exit={{ x: -24, opacity: 0 }}
+      transition={{ duration: 0.18, ease: [0.2, 0, 0.2, 1] }}
+    >
       <SidebarChrome
         canGoBack={canGoBack}
         canGoForward={canGoForward}
         onBack={onBack}
         onForward={onForward}
+        onToggleSidebar={onToggleSidebar}
       />
 
       <div className="sidebar-context">
         {workspace ? (
-          <button
-            type="button"
-            className="sidebar-context-button"
-            title="Back to workspaces"
-            onClick={onOpenLibrary}
-          >
-            <span className="sidebar-monogram">{initials(contextName)}</span>
-            <span>{contextName}</span>
-            <ChevronDown size={14} aria-hidden="true" />
-          </button>
+          <SelectMenu
+            value={workspace.id}
+            ariaLabel="Select workspace"
+            className="workspace-select"
+            options={orderedWorkspaces.map((item) => ({
+              value: item.id,
+              label: item.name,
+              description: item.description || "Ralphy production workspace",
+              meta: `${item.projectCount} projects`,
+              icon: (
+                <span className="workspace-option-avatar">
+                  {initials(item.name)}
+                </span>
+              ),
+            }))}
+            onValueChange={onOpenWorkspace}
+          />
         ) : (
           <div className="sidebar-context-button">
             <span className="sidebar-monogram">{initials(contextName)}</span>
@@ -190,8 +199,8 @@ export function ContextSidebar({
         <button
           className={`icon-button${searchVisible ? " is-active" : ""}`}
           type="button"
-          title={workspace ? "Filter projects" : "Filter workspaces"}
-          aria-label={workspace ? "Filter projects" : "Filter workspaces"}
+          title="Filter projects"
+          aria-label="Filter projects"
           aria-pressed={searchVisible}
           onClick={() => {
             setSearchVisible((visible) => !visible);
@@ -209,8 +218,8 @@ export function ContextSidebar({
             ref={searchRef}
             type="search"
             value={query}
-            placeholder={workspace ? "Filter projects" : "Filter workspaces"}
-            aria-label={workspace ? "Filter projects" : "Filter workspaces"}
+            placeholder="Filter projects"
+            aria-label="Filter projects"
             onChange={(event) => {
               setQuery(event.target.value);
               setVisibleLimit(12);
@@ -222,10 +231,6 @@ export function ContextSidebar({
 
       {workspace && (
         <div className="sidebar-nav">
-          <button type="button" className="sidebar-nav-row" onClick={onOpenLibrary}>
-            <Layers3 size={16} strokeWidth={1.5} />
-            <span>All workspaces</span>
-          </button>
           <div className="sidebar-nav-row">
             <UsersRound size={16} strokeWidth={1.5} />
             <span>Units</span>
@@ -240,87 +245,53 @@ export function ContextSidebar({
       )}
 
       <div className="sidebar-section-label">
-        <span>{workspace ? "Projects" : "Recent workspaces"}</span>
+        <span>Projects</span>
         <span>{visibleItems.length}</span>
       </div>
 
       <div className="sidebar-list">
-        {workspace
-          ? shownProjects.map((project) => {
-              const active =
-                route.kind === "project" && route.projectId === project.projectId;
-              const pinned = pinnedProjectIds.includes(project.id);
-              return (
-                <div
-                  role="button"
-                  tabIndex={0}
-                  className={`sidebar-row${active ? " is-selected" : ""}`}
-                  key={project.id}
-                  onClick={() => onOpenProject(project)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      onOpenProject(project);
-                    }
-                  }}
-                >
-                  <Folder size={16} strokeWidth={1.5} aria-hidden="true" />
-                  <span className="sidebar-row-copy">
-                    <span className="sidebar-row-title">{project.name}</span>
-                    <span className="sidebar-row-meta">
-                      {project.phase ?? project.status}
+        {shownProjects.map((project) => {
+          const active =
+            route.kind === "project" && route.projectId === project.projectId;
+          const pinned = pinnedProjectIds.includes(project.id);
+          return (
+            <div
+              role="button"
+              tabIndex={0}
+              className={`sidebar-row${active ? " is-selected" : ""}`}
+              key={project.id}
+              onClick={() => onOpenProject(project)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onOpenProject(project);
+                }
+              }}
+            >
+              <Folder size={16} strokeWidth={1.5} aria-hidden="true" />
+              <span className="sidebar-row-copy">
+                <span className="sidebar-row-title">{project.name}</span>
+                <span className="sidebar-row-meta">
+                  {project.phase ?? project.status}
+                  <span aria-hidden="true">·</span>
+                  {relativeActivity(project.recentActivity)}
+                  {project.spendUsd !== null && (
+                    <>
                       <span aria-hidden="true">·</span>
-                      {relativeActivity(project.recentActivity)}
-                      {project.spendUsd !== null && (
-                        <>
-                          <span aria-hidden="true">·</span>
-                          <CircleDollarSign size={11} aria-hidden="true" />
-                          {project.spendUsd.toFixed(2)}
-                        </>
-                      )}
-                    </span>
-                  </span>
-                  <PinButton
-                    active={pinned}
-                    label={pinned ? "Unpin project" : "Pin project"}
-                    onClick={() => onToggleProjectPin(project.id)}
-                  />
-                </div>
-              );
-            })
-          : shownWorkspaces.map((item) => {
-              const pinned = pinnedWorkspaceIds.includes(item.id);
-              return (
-                <div
-                  role="button"
-                  tabIndex={0}
-                  className="sidebar-row"
-                  key={item.id}
-                  onClick={() => onOpenWorkspace(item.id)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      onOpenWorkspace(item.id);
-                    }
-                  }}
-                >
-                  <FolderKanban size={16} strokeWidth={1.5} aria-hidden="true" />
-                  <span className="sidebar-row-copy">
-                    <span className="sidebar-row-title">{item.name}</span>
-                    <span className="sidebar-row-meta">
-                      {item.projectCount} projects
-                      <span aria-hidden="true">·</span>
-                      {relativeActivity(item.recentActivity)}
-                    </span>
-                  </span>
-                  <PinButton
-                    active={pinned}
-                    label={pinned ? "Unpin workspace" : "Pin workspace"}
-                    onClick={() => onToggleWorkspacePin(item.id)}
-                  />
-                </div>
-              );
-            })}
+                      <CircleDollarSign size={11} aria-hidden="true" />
+                      {project.spendUsd.toFixed(2)}
+                    </>
+                  )}
+                </span>
+              </span>
+              <PinButton
+                active={pinned}
+                label={pinned ? "Unpin project" : "Pin project"}
+                onClick={() => onToggleProjectPin(project.id)}
+              />
+            </div>
+          );
+        })}
         {visibleItems.length === 0 && (
           <div className="sidebar-empty">No matching results</div>
         )}
@@ -336,8 +307,11 @@ export function ContextSidebar({
       </div>
 
       <div className="sidebar-footer">
-        <span className="library-mark">R</span>
-        <span title={rootPath}>{rootPath}</span>
+        <ProfileAvatar rootPath={rootPath} />
+        <span className="sidebar-profile-copy">
+          <strong>{identity}</strong>
+          <small title={rootPath}>.ralphy library</small>
+        </span>
         <button
           className="icon-button"
           type="button"
@@ -348,6 +322,6 @@ export function ContextSidebar({
           <FolderOpen size={15} strokeWidth={1.5} />
         </button>
       </div>
-    </aside>
+    </motion.aside>
   );
 }

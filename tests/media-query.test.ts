@@ -5,6 +5,7 @@ import type {
   MediaQueryOptions,
 } from "../electron/media/types";
 import {
+  assetGridGeometry,
   columnCountForWidth,
   createPreviewScheduler,
   defaultMediaQuery,
@@ -148,6 +149,28 @@ describe("grid geometry", () => {
     expect(columnCountForWidth(800, 220, 12)).toBe(3);
     expect(columnCountForWidth(1110, 220, 12)).toBe(4);
     expect(columnCountForWidth(180, 220, 12)).toBe(1);
+  });
+
+  test("reserves one explicit non-overlapping height for every virtual asset row", () => {
+    const geometry = assetGridGeometry(1110, 220, 16);
+
+    expect(geometry.columns).toBe(4);
+    expect(geometry.tileWidth).toBeCloseTo(265.5);
+    expect(geometry.tileHeight).toBeCloseTo(219.94, 1);
+    expect(geometry.rowHeight).toBeCloseTo(235.94, 1);
+    expect(geometry.rowHeight).toBeGreaterThanOrEqual(
+      geometry.tileHeight + geometry.gap,
+    );
+  });
+
+  test("keeps row geometry finite at a collapsed container width", () => {
+    expect(assetGridGeometry(0, 220, 16)).toEqual({
+      columns: 1,
+      tileWidth: 1,
+      tileHeight: 55,
+      rowHeight: 71,
+      gap: 16,
+    });
   });
 
   test("bounds concurrent preview decodes by media kind", async () => {

@@ -4,21 +4,37 @@ import {
   CircleDollarSign,
   Film,
   FolderOpen,
+  LayoutGrid,
+  List,
 } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 import type { ProjectSummary, WorkspaceSummary } from "../lib/ipc";
-import { sortProjects } from "../state/workbench";
+import { sortProjects, type WorkspaceView } from "../state/workbench";
 
 interface WorkspaceScreenProps {
   workspace: WorkspaceSummary;
   projects: ProjectSummary[];
   pinnedProjectIds: string[];
+  view: WorkspaceView;
+  onViewChange(view: WorkspaceView): void;
   onOpenProject(project: ProjectSummary): void;
+}
+
+function relativeActivity(value: string): string {
+  const elapsed = Date.now() - Date.parse(value);
+  if (!Number.isFinite(elapsed) || elapsed < 0) return "now";
+  const hours = Math.floor(elapsed / 3_600_000);
+  if (hours < 24) return `${Math.max(1, hours)}h`;
+  const days = Math.floor(hours / 24);
+  return days < 30 ? `${days}d` : new Date(value).toLocaleDateString();
 }
 
 export function WorkspaceScreen({
   workspace,
   projects,
   pinnedProjectIds,
+  view,
+  onViewChange,
   onOpenProject,
 }: WorkspaceScreenProps) {
   const ordered = sortProjects(projects, pinnedProjectIds);
@@ -38,9 +54,33 @@ export function WorkspaceScreen({
           <h2>{workspace.name}</h2>
           <p>{workspace.description || "Ralphy production workspace"}</p>
         </div>
-        <span className="activity-stamp">
-          Updated {new Date(workspace.recentActivity).toLocaleDateString()}
-        </span>
+        <div className="workspace-header-actions">
+          <span className="activity-stamp">
+            Updated {new Date(workspace.recentActivity).toLocaleDateString()}
+          </span>
+          <div className="view-segments" role="group" aria-label="Project view">
+            <button
+              className={view === "grid" ? "is-active" : ""}
+              type="button"
+              title="Grid view"
+              aria-label="Grid view"
+              aria-pressed={view === "grid"}
+              onClick={() => onViewChange("grid")}
+            >
+              <LayoutGrid size={15} strokeWidth={1.5} />
+            </button>
+            <button
+              className={view === "list" ? "is-active" : ""}
+              type="button"
+              title="List view"
+              aria-label="List view"
+              aria-pressed={view === "list"}
+              onClick={() => onViewChange("list")}
+            >
+              <List size={15} strokeWidth={1.5} />
+            </button>
+          </div>
+        </div>
       </div>
 
       <section className="metrics-band" aria-label="Workspace summary">
@@ -73,36 +113,94 @@ export function WorkspaceScreen({
           <h3>Recent projects</h3>
           <span>Sorted by activity</span>
         </div>
-        <div className="project-table" role="table" aria-label="Projects">
-          <div className="project-table-head" role="row">
-            <span>Name</span>
-            <span>Phase</span>
-            <span>Final</span>
-            <span>Spend</span>
-            <span />
-          </div>
-          {ordered.map((project) => (
-            <button
-              className="project-table-row"
-              type="button"
-              role="row"
-              key={project.id}
-              onClick={() => onOpenProject(project)}
+        <AnimatePresence mode="wait" initial={false}>
+          {view === "grid" ? (
+            <motion.div
+              className="workspace-project-grid"
+              key="grid"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              transition={{ duration: 0.14 }}
             >
-              <span className="project-name-cell">
-                <strong>{project.name}</strong>
-                <small>{project.brief || project.projectId}</small>
-              </span>
-              <span><i className={`phase-indicator phase-${project.phase ?? "unknown"}`} />{project.phase ?? project.status}</span>
-              <span>{project.finalState}</span>
-              <span className="mono-number">
-                {project.spendUsd === null ? "—" : `$${project.spendUsd.toFixed(2)}`}
-              </span>
-              <ArrowRight size={14} />
-            </button>
-          ))}
-          {ordered.length === 0 && <div className="empty-section">No projects in this workspace.</div>}
-        </div>
+              {ordered.map((project) => (
+                <motion.button
+                  className="workspace-project-card"
+                  type="button"
+                  layout="position"
+                  whileHover={{ y: -2 }}
+                  whileTap={{ scale: 0.99 }}
+                  key={project.id}
+                  onClick={() => onOpenProject(project)}
+                >
+                  <span className="workspace-project-card-head">
+                    <span className="workspace-project-icon">
+                      <FolderOpen size={16} strokeWidth={1.5} />
+                    </span>
+                    <span className="workspace-project-phase">
+                      <i className={`phase-indicator phase-${project.phase ?? "unknown"}`} />
+                      {project.phase ?? project.status}
+                    </span>
+                  </span>
+                  <span className="workspace-project-card-copy">
+                    <strong>{project.name}</strong>
+                    <small>{project.brief || project.projectId}</small>
+                  </span>
+                  <span className="workspace-project-card-footer">
+                    <span>{project.finalState}</span>
+                    <span className="mono-number">
+                      {project.spendUsd === null ? "—" : `$${project.spendUsd.toFixed(2)}`}
+                    </span>
+                    <span>{relativeActivity(project.recentActivity)}</span>
+                    <ArrowRight size={14} />
+                  </span>
+                </motion.button>
+              ))}
+            </motion.div>
+          ) : (
+            <motion.div
+              className="project-table"
+              role="table"
+              aria-label="Projects"
+              key="list"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              transition={{ duration: 0.14 }}
+            >
+              <div className="project-table-head" role="row">
+                <span>Name</span>
+                <span>Phase</span>
+                <span>Final</span>
+                <span>Spend</span>
+                <span />
+              </div>
+              {ordered.map((project) => (
+                <button
+                  className="project-table-row"
+                  type="button"
+                  role="row"
+                  key={project.id}
+                  onClick={() => onOpenProject(project)}
+                >
+                  <span className="project-name-cell">
+                    <strong>{project.name}</strong>
+                    <small>{project.brief || project.projectId}</small>
+                  </span>
+                  <span><i className={`phase-indicator phase-${project.phase ?? "unknown"}`} />{project.phase ?? project.status}</span>
+                  <span>{project.finalState}</span>
+                  <span className="mono-number">
+                    {project.spendUsd === null ? "—" : `$${project.spendUsd.toFixed(2)}`}
+                  </span>
+                  <ArrowRight size={14} />
+                </button>
+              ))}
+            </motion.div>
+          )}
+        </AnimatePresence>
+        {ordered.length === 0 && (
+          <div className="empty-section">No projects in this workspace.</div>
+        )}
       </section>
     </main>
   );

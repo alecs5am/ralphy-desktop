@@ -1,7 +1,18 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
+import { AnimatePresence, LayoutGroup, MotionConfig, motion } from "motion/react";
 import { ContextSidebar } from "./components/ContextSidebar";
 import { Inspector } from "./components/Inspector";
 import { MainHeader } from "./components/Titlebar";
+import { BottomPanel, RightPanelSummary } from "./components/UtilityPanels";
 import {
   bridge,
   type MediaAnnotation,
@@ -9,16 +20,27 @@ import {
   type ProjectSummary,
 } from "./lib/ipc";
 import { LibraryScreen } from "./screens/LibraryScreen";
-import { AssetViewer } from "./screens/AssetViewer";
-import { ProjectScreen } from "./screens/ProjectScreen";
 import { WorkspaceScreen } from "./screens/WorkspaceScreen";
 import {
   createInitialWorkbenchState,
+  mostRecentWorkspaceId,
   readWorkbenchPreferences,
   workbenchReducer,
   writeWorkbenchPreferences,
+  type WorkspaceView,
 } from "./state/workbench";
 import { adjacentMediaItem } from "./lib/review";
+
+const loadAssetViewer = () =>
+  import("./screens/AssetViewer").then(({ AssetViewer }) => ({
+    default: AssetViewer,
+  }));
+const AssetViewer = lazy(loadAssetViewer);
+const loadProjectScreen = () =>
+  import("./screens/ProjectScreen").then(({ ProjectScreen }) => ({
+    default: ProjectScreen,
+  }));
+const ProjectScreen = lazy(loadProjectScreen);
 
 export function App() {
   const initialPreferences = useRef(readWorkbenchPreferences(localStorage));
@@ -30,7 +52,18 @@ export function App() {
   const [restoring, setRestoring] = useState(true);
   const [projectLoading, setProjectLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [inspectorVisible, setInspectorVisible] = useState(false);
+  const [sidebarVisible, setSidebarVisible] = useState(
+    initialPreferences.current.sidebarVisible,
+  );
+  const [rightPanelVisible, setRightPanelVisible] = useState(
+    initialPreferences.current.rightPanelVisible,
+  );
+  const [bottomPanelVisible, setBottomPanelVisible] = useState(
+    initialPreferences.current.bottomPanelVisible,
+  );
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(
+    initialPreferences.current.workspaceView,
+  );
   const [sidebarSearchRequest, setSidebarSearchRequest] = useState(0);
   const [includeIntermediate, setIncludeIntermediate] = useState(false);
   const [annotations, setAnnotations] = useState<Record<string, MediaAnnotation>>({});
@@ -74,27 +107,37 @@ export function App() {
         .restoreLibrary()
         .then((result) => {
           if (!result) return;
-          dispatch({ type: "library-opened", catalog: result.catalog });
-          void bridge.loadAnnotations().then((store) => setAnnotations(store.items));
           const saved = initialPreferences.current;
-          if (saved.rootPath !== result.rootPath || !saved.workspaceId) return;
-          const workspaceExists = result.catalog.workspaces.some(
-            (workspace) => workspace.id === saved.workspaceId,
-          );
-          if (!workspaceExists) return;
-          dispatch({ type: "open-workspace", workspaceId: saved.workspaceId });
+          const savedWorkspace =
+            saved.rootPath === result.rootPath &&
+            saved.workspaceId &&
+            result.catalog.workspaces.some(
+              (workspace) => workspace.id === saved.workspaceId,
+            )
+              ? saved.workspaceId
+              : null;
+          const workspaceId =
+            savedWorkspace ?? mostRecentWorkspaceId(result.catalog.workspaces);
+          dispatch({
+            type: "library-opened",
+            catalog: result.catalog,
+            workspaceId,
+          });
+          void bridge.loadAnnotations().then((store) => setAnnotations(store.items));
           if (
+            workspaceId &&
+            saved.rootPath === result.rootPath &&
             saved.projectId &&
             result.catalog.projects.some(
               (project) =>
-                project.workspaceId === saved.workspaceId &&
+                project.workspaceId === workspaceId &&
                 project.projectId === saved.projectId,
             )
           ) {
             dispatch({
               type: "open-project",
               project: {
-                workspaceId: saved.workspaceId,
+                workspaceId,
                 projectId: saved.projectId,
               },
             });
@@ -142,11 +185,24 @@ export function App() {
   useEffect(() => {
     setSelectedAsset(null);
     setViewer(null);
-    setInspectorVisible(false);
   }, [
     state.route.kind === "project" ? state.route.projectId : null,
     state.route.kind === "project" ? state.route.workspaceId : null,
   ]);
+
+  useEffect(() => {
+    if (state.route.kind !== "project") return;
+    const timer = window.setTimeout(() => void loadAssetViewer(), 0);
+    return () => window.clearTimeout(timer);
+  }, [state.route.kind]);
+
+  useEffect(() => {
+    if (state.route.kind !== "workspace") return;
+    const timer = window.setTimeout(() => {
+      void Promise.all([loadProjectScreen(), loadAssetViewer()]);
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [state.route.kind]);
 
   useEffect(() => {
     const workspaceId = state.route.kind === "library" ? null : state.route.workspaceId;
@@ -157,12 +213,20 @@ export function App() {
       projectId,
       pinnedWorkspaceIds: state.pinnedWorkspaceIds,
       pinnedProjectIds: state.pinnedProjectIds,
+      sidebarVisible,
+      rightPanelVisible,
+      bottomPanelVisible,
+      workspaceView,
     });
   }, [
+    bottomPanelVisible,
     catalog?.rootPath,
+    rightPanelVisible,
+    sidebarVisible,
     state.pinnedProjectIds,
     state.pinnedWorkspaceIds,
     state.route,
+    workspaceView,
   ]);
 
   const chooseLibrary = useCallback(async () => {
@@ -170,7 +234,11 @@ export function App() {
     try {
       const result = await bridge.chooseLibrary();
       if (result) {
-        dispatch({ type: "library-opened", catalog: result.catalog });
+        dispatch({
+          type: "library-opened",
+          catalog: result.catalog,
+          workspaceId: mostRecentWorkspaceId(result.catalog.workspaces),
+        });
         const store = await bridge.loadAnnotations();
         setAnnotations(store.items);
         setSelectedAsset(null);
@@ -197,6 +265,9 @@ export function App() {
       } else if (event.metaKey && event.key.toLocaleLowerCase() === "f") {
         event.preventDefault();
         setSidebarSearchRequest((request) => request + 1);
+      } else if (event.metaKey && event.key.toLocaleLowerCase() === "b") {
+        event.preventDefault();
+        setSidebarVisible((visible) => !visible);
       }
     };
     const onMouseUp = (event: MouseEvent) => {
@@ -224,7 +295,7 @@ export function App() {
   const viewerItem = viewer?.items.find((item) => item.id === viewer.itemId) ?? null;
   const viewerItems = viewer?.items ?? [];
   const breadcrumbs = selectedProject
-    ? [selectedProject.name, viewerItem?.name ?? "Project"]
+    ? [selectedWorkspace?.name ?? "Workspace", selectedProject.name]
     : selectedWorkspace
       ? [selectedWorkspace.name]
       : ["Workspaces"];
@@ -258,7 +329,6 @@ export function App() {
     }
     setViewer(null);
     setSelectedAsset(null);
-    setInspectorVisible(false);
   };
 
   if (restoring) {
@@ -285,122 +355,164 @@ export function App() {
         workspace={selectedWorkspace}
         projects={projects.filter((project) => project.workspaceId === selectedWorkspace.id)}
         pinnedProjectIds={state.pinnedProjectIds}
+        view={workspaceView}
+        onViewChange={setWorkspaceView}
         onOpenProject={openProject}
       />
     );
   } else if (state.route.kind === "project" && selectedProject) {
     content = (
-      <>
-        <div className="project-screen-slot" hidden={viewerItem !== null}>
-          <ProjectScreen
-            project={selectedProject}
-            scan={state.project}
-            annotations={annotations}
-            loading={projectLoading}
-            includeIntermediate={includeIntermediate}
-            onIncludeIntermediateChange={setIncludeIntermediate}
-            onSelectAsset={(item) => {
-              setSelectedAsset(item);
-              if (!item) setInspectorVisible(false);
-            }}
-            onOpenAsset={(item, visibleItems) => {
-              setSelectedAsset(item);
-              setViewer({ itemId: item.id, items: visibleItems });
-              setInspectorVisible(false);
-            }}
-          />
-        </div>
-        {viewerItem && viewer && (
-          <AssetViewer
-            item={viewerItem}
-            project={selectedProject}
-            annotation={annotations[viewerItem.id]}
-            canPrevious={adjacentMediaItem(viewerItems, viewerItem.id, -1) !== null}
-            canNext={adjacentMediaItem(viewerItems, viewerItem.id, 1) !== null}
-            onBack={() => setViewer(null)}
-            onPrevious={() => {
-              const item = adjacentMediaItem(viewerItems, viewerItem.id, -1);
-              if (item) {
-                setViewer({ itemId: item.id, items: viewerItems });
-                setSelectedAsset(item);
-              }
-            }}
-            onNext={() => {
-              const item = adjacentMediaItem(viewerItems, viewerItem.id, 1);
-              if (item) {
-                setViewer({ itemId: item.id, items: viewerItems });
-                setSelectedAsset(item);
-              }
-            }}
-          />
-        )}
-      </>
+      <Suspense
+        fallback={
+          <main className="main-region project-region">
+            <div className="project-indexing">
+              <span className="loading-line" />
+              <span>Opening project…</span>
+            </div>
+          </main>
+        }
+      >
+        <ProjectScreen
+          project={selectedProject}
+          scan={state.project}
+          annotations={annotations}
+          loading={projectLoading}
+          includeIntermediate={includeIntermediate}
+          onIncludeIntermediateChange={setIncludeIntermediate}
+          onSelectAsset={setSelectedAsset}
+          onOpenAsset={(item, visibleItems) => {
+            setSelectedAsset(item);
+            setViewer({ itemId: item.id, items: visibleItems });
+          }}
+        />
+      </Suspense>
     );
   }
 
-  const showInspector =
-    state.route.kind === "project" &&
-    selectedProject !== null &&
-    selectedAsset !== null &&
-    inspectorVisible;
+  const showRightPanel = catalog !== null && rightPanelVisible;
+  const canGoBack = viewerItem !== null || state.historyIndex > 0;
+  const canGoForward = state.historyIndex < state.history.length - 1;
 
   return (
-    <div className={`workbench${showInspector ? " has-inspector" : ""}`}>
-      {catalog && (
-        <ContextSidebar
-          route={state.route}
-          rootPath={catalog.rootPath}
-          workspaces={workspaces}
-          projects={projects}
-          pinnedWorkspaceIds={state.pinnedWorkspaceIds}
-          pinnedProjectIds={state.pinnedProjectIds}
-          searchRequest={sidebarSearchRequest}
-          canGoBack={viewerItem !== null || state.historyIndex > 0}
-          canGoForward={state.historyIndex < state.history.length - 1}
-          onBack={navigateBack}
-          onForward={() => dispatch({ type: "forward" })}
-          onChooseLibrary={chooseLibrary}
-          onOpenLibrary={() => dispatch({ type: "open-library" })}
-          onOpenWorkspace={(workspaceId) => dispatch({ type: "open-workspace", workspaceId })}
-          onOpenProject={openProject}
-          onToggleWorkspacePin={(workspaceId) =>
-            dispatch({ type: "toggle-workspace-pin", workspaceId })
-          }
-          onToggleProjectPin={(projectId) =>
-            dispatch({ type: "toggle-project-pin", projectId })
-          }
-        />
-      )}
-      <section className="main-shell">
-        <MainHeader
-          breadcrumbs={breadcrumbs}
-          canToggleInspector={
-            state.route.kind === "project" && selectedAsset !== null
-          }
-          inspectorVisible={
-            state.route.kind === "project" && inspectorVisible && selectedAsset !== null
-          }
-          showChooseLibrary={!catalog}
-          onChooseLibrary={chooseLibrary}
-          onToggleInspector={() => setInspectorVisible((visible) => !visible)}
-        />
-        {content}
-      </section>
-      {showInspector && (
-        <Inspector
-          item={selectedAsset}
-          project={selectedProject}
-          annotation={annotations[selectedAsset.id]}
-          onChange={(input) => void updateAnnotation(selectedAsset, input)}
-          onTrash={() => void trashSelected()}
-        />
-      )}
-      {error && (
-        <div className="error-banner" role="alert">
-          <span>{error}</span>
-          <button type="button" onClick={() => setError(null)}>Dismiss</button>
+    <MotionConfig reducedMotion="user">
+      <LayoutGroup id="asset-workbench">
+        <div
+          className={[
+            "workbench",
+            !sidebarVisible ? " sidebar-collapsed" : "",
+            showRightPanel ? " has-right-panel" : "",
+            bottomPanelVisible ? " has-bottom-panel" : "",
+          ].join("")}
+        >
+          <AnimatePresence initial={false}>
+            {catalog && sidebarVisible && (
+              <ContextSidebar
+                route={state.route}
+                rootPath={catalog.rootPath}
+                workspaces={workspaces}
+                projects={projects}
+                pinnedWorkspaceIds={state.pinnedWorkspaceIds}
+                pinnedProjectIds={state.pinnedProjectIds}
+                searchRequest={sidebarSearchRequest}
+                canGoBack={canGoBack}
+                canGoForward={canGoForward}
+                onBack={navigateBack}
+                onForward={() => dispatch({ type: "forward" })}
+                onToggleSidebar={() => setSidebarVisible(false)}
+                onChooseLibrary={chooseLibrary}
+                onOpenWorkspace={(workspaceId) =>
+                  dispatch({ type: "open-workspace", workspaceId })
+                }
+                onOpenProject={openProject}
+                onToggleProjectPin={(projectId) =>
+                  dispatch({ type: "toggle-project-pin", projectId })
+                }
+              />
+            )}
+          </AnimatePresence>
+          <motion.section className="main-shell" layout>
+            <MainHeader
+              breadcrumbs={breadcrumbs}
+              sidebarVisible={sidebarVisible}
+              canGoBack={canGoBack}
+              canGoForward={canGoForward}
+              rightPanelVisible={rightPanelVisible}
+              bottomPanelVisible={bottomPanelVisible}
+              showChooseLibrary={!catalog}
+              onBack={navigateBack}
+              onForward={() => dispatch({ type: "forward" })}
+              onToggleSidebar={() => setSidebarVisible((visible) => !visible)}
+              onChooseLibrary={chooseLibrary}
+              onToggleRightPanel={() =>
+                setRightPanelVisible((visible) => !visible)
+              }
+              onToggleBottomPanel={() =>
+                setBottomPanelVisible((visible) => !visible)
+              }
+            />
+            <div className="main-content-stage">{content}</div>
+            <AnimatePresence initial={false}>
+              {bottomPanelVisible && (
+                <BottomPanel onClose={() => setBottomPanelVisible(false)} />
+              )}
+            </AnimatePresence>
+          </motion.section>
+          <AnimatePresence initial={false}>
+            {showRightPanel && selectedProject && selectedAsset ? (
+              <Inspector
+                key="asset-inspector"
+                item={selectedAsset}
+                project={selectedProject}
+                annotation={annotations[selectedAsset.id]}
+                onChange={(input) => void updateAnnotation(selectedAsset, input)}
+                onTrash={() => void trashSelected()}
+              />
+            ) : showRightPanel ? (
+              <RightPanelSummary
+                key="right-summary"
+                workspace={selectedWorkspace}
+                project={selectedProject}
+                onClose={() => setRightPanelVisible(false)}
+              />
+            ) : null}
+          </AnimatePresence>
+          <Suspense fallback={null}>
+            <AnimatePresence initial={false}>
+              {viewerItem && viewer && selectedProject && (
+                <AssetViewer
+                  key="asset-modal"
+                  item={viewerItem}
+                  project={selectedProject}
+                  annotation={annotations[viewerItem.id]}
+                  canPrevious={adjacentMediaItem(viewerItems, viewerItem.id, -1) !== null}
+                  canNext={adjacentMediaItem(viewerItems, viewerItem.id, 1) !== null}
+                  onBack={() => setViewer(null)}
+                  onPrevious={() => {
+                    const item = adjacentMediaItem(viewerItems, viewerItem.id, -1);
+                    if (item) {
+                      setViewer({ itemId: item.id, items: viewerItems });
+                      setSelectedAsset(item);
+                    }
+                  }}
+                  onNext={() => {
+                    const item = adjacentMediaItem(viewerItems, viewerItem.id, 1);
+                    if (item) {
+                      setViewer({ itemId: item.id, items: viewerItems });
+                      setSelectedAsset(item);
+                    }
+                  }}
+                />
+              )}
+            </AnimatePresence>
+          </Suspense>
+          {error && (
+            <div className="error-banner" role="alert">
+              <span>{error}</span>
+              <button type="button" onClick={() => setError(null)}>Dismiss</button>
+            </div>
+          )}
         </div>
-      )}
-    </div>
+      </LayoutGroup>
+    </MotionConfig>
   );
 }

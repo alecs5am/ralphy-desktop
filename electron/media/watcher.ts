@@ -111,7 +111,9 @@ export class LibraryWatcher {
       );
       this.#watchers.push(workspaceWatcher);
       workspaceWatcher.on("error", onError);
-      return true;
+      // Recursive macOS watchers can return before the FSEvents stream is armed.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return lifecycleGeneration === this.#lifecycleGeneration;
     } catch (error) {
       this.close();
       throw error;

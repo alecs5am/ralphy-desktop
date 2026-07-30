@@ -7,6 +7,7 @@ import {
   Music2,
   Star,
 } from "lucide-react";
+import { motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import type { MediaAnnotation, MediaItem, ReviewStatus } from "../lib/ipc";
 import { bridge } from "../lib/ipc";
@@ -93,9 +94,14 @@ export function AssetTile({
 }: AssetTileProps) {
   const status = annotation?.reviewStatus ?? "Unreviewed";
   return (
-    <button
+    <motion.button
       type="button"
       className={`asset-tile${selected ? " is-selected" : ""}`}
+      layoutId={`asset-${item.id}`}
+      style={{ borderRadius: 14 }}
+      transition={{ layout: { type: "spring", stiffness: 420, damping: 36 } }}
+      whileHover={{ y: -2 }}
+      whileTap={{ scale: 0.99 }}
       title={item.projectRelativePath}
       onClick={onSelect}
       onDoubleClick={onOpen}
@@ -125,6 +131,6 @@ export function AssetTile({
           )}
         </small>
       </span>
-    </button>
+    </motion.button>
   );
 }

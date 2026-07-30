@@ -7,6 +7,7 @@ import type {
 } from "../electron/media/types";
 import {
   createInitialWorkbenchState,
+  mostRecentWorkspaceId,
   readWorkbenchPreferences,
   sortProjects,
   sortWorkspaces,
@@ -88,14 +89,15 @@ describe("workbench navigation", () => {
     state = workbenchReducer(state, {
       type: "library-opened",
       catalog: { ...catalog, rootPath: "/tmp/other/.ralphy", generation: 1 },
+      workspaceId: "newer",
     });
 
-    expect(state.route).toEqual({ kind: "library" });
-    expect(state.history).toEqual([{ kind: "library" }]);
+    expect(state.route).toEqual({ kind: "workspace", workspaceId: "newer" });
+    expect(state.history).toEqual([{ kind: "workspace", workspaceId: "newer" }]);
     expect(state.project).toBeNull();
   });
 
-  test("moves Library -> Workspace -> Project and back without a second sidebar", () => {
+  test("moves Workspace -> Project and back without losing workspace context", () => {
     let state = createInitialWorkbenchState();
     state = workbenchReducer(state, { type: "catalog-received", catalog });
     state = workbenchReducer(state, { type: "open-workspace", workspaceId: "newer" });
@@ -113,10 +115,12 @@ describe("workbench navigation", () => {
 
     state = workbenchReducer(state, { type: "back" });
     expect(state.route).toEqual({ kind: "workspace", workspaceId: "newer" });
-    state = workbenchReducer(state, { type: "open-library" });
-    expect(state.route).toEqual({ kind: "library" });
     state = workbenchReducer(state, { type: "forward" });
-    expect(state.route).toEqual({ kind: "workspace", workspaceId: "newer" });
+    expect(state.route).toEqual({
+      kind: "project",
+      workspaceId: "newer",
+      projectId: "newer-project",
+    });
   });
 
   test("rejects stale catalog and project results", () => {
@@ -157,6 +161,52 @@ describe("workbench navigation", () => {
     };
     state = workbenchReducer(state, { type: "project-received", project: stale });
     expect(state.project).toBeNull();
+  });
+
+  test("keeps catalog refreshes on the nearest valid workspace route", () => {
+    let state = createInitialWorkbenchState();
+    state = workbenchReducer(state, {
+      type: "library-opened",
+      catalog,
+      workspaceId: "newer",
+    });
+    state = workbenchReducer(state, {
+      type: "open-project",
+      project: { workspaceId: "newer", projectId: "newer-project" },
+    });
+
+    state = workbenchReducer(state, {
+      type: "catalog-received",
+      catalog: {
+        ...catalog,
+        generation: 5,
+        projects: projects.filter((item) => item.projectId !== "newer-project"),
+      },
+    });
+    expect(state.route).toEqual({ kind: "workspace", workspaceId: "newer" });
+    expect(state.history[state.historyIndex]).toEqual(state.route);
+
+    state = workbenchReducer(state, {
+      type: "catalog-received",
+      catalog: {
+        ...catalog,
+        generation: 6,
+        workspaces: [workspaces[0]],
+        projects: [],
+      },
+    });
+    expect(state.route).toEqual({ kind: "workspace", workspaceId: "older" });
+
+    state = workbenchReducer(state, {
+      type: "catalog-received",
+      catalog: {
+        ...catalog,
+        generation: 7,
+        workspaces: [],
+        projects: [],
+      },
+    });
+    expect(state.route).toEqual({ kind: "library" });
   });
 
   test("promotes scanned spend into workspace and library summaries", () => {
@@ -212,7 +262,26 @@ describe("workbench ordering and preferences", () => {
     ]);
   });
 
-  test("round-trips app-local root, selection, and pins", () => {
+  test("selects the newest workspace when no valid preference exists", () => {
+    expect(mostRecentWorkspaceId(workspaces)).toBe("newer");
+    expect(mostRecentWorkspaceId([])).toBeNull();
+  });
+
+  test("defaults to an open sidebar, closed utility panels, and workspace grid", () => {
+    const preferences = readWorkbenchPreferences({
+      getItem: () => null,
+      setItem: () => undefined,
+    });
+
+    expect(preferences).toMatchObject({
+      sidebarVisible: true,
+      rightPanelVisible: false,
+      bottomPanelVisible: false,
+      workspaceView: "grid",
+    });
+  });
+
+  test("round-trips app-local navigation, panels, view, and pins", () => {
     const values = new Map<string, string>();
     const storage = {
       getItem: (key: string) => values.get(key) ?? null,
@@ -224,6 +293,10 @@ describe("workbench ordering and preferences", () => {
       projectId: "newer-project",
       pinnedWorkspaceIds: ["newer"],
       pinnedProjectIds: ["newer/newer-project"],
+      sidebarVisible: false,
+      rightPanelVisible: true,
+      bottomPanelVisible: true,
+      workspaceView: "list" as const,
     };
 
     writeWorkbenchPreferences(storage, preferences);

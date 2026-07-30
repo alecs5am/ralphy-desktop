@@ -103,6 +103,45 @@ describe("watcher lifecycle", () => {
     expect(onCatalogChange).not.toHaveBeenCalled();
   });
 
+  test("closes attached watchers when close wins the readiness barrier", async () => {
+    fixture = await makeLibraryFixture();
+    let resolveAttached: (() => void) | undefined;
+    const attached = new Promise<void>((resolve) => {
+      resolveAttached = resolve;
+    });
+    const closeRoot = vi.fn();
+    const closeWorkspaces = vi.fn();
+    const rootWatcher = {
+      close: closeRoot,
+      on: vi.fn().mockReturnThis(),
+    };
+    const workspaceWatcher = {
+      close: closeWorkspaces,
+      on: vi.fn().mockReturnThis(),
+    };
+    const watchFileSystem = vi.fn()
+      .mockReturnValueOnce(rootWatcher)
+      .mockImplementationOnce(() => {
+        resolveAttached?.();
+        return workspaceWatcher;
+      });
+    const watcher = new LibraryWatcher({
+      rootPath: fixture.rootPath,
+      selectedProject: () => null,
+      onCatalogChange: () => undefined,
+      onSelectedProjectChange: () => undefined,
+      watchFileSystem: watchFileSystem as unknown as typeof import("node:fs").watch,
+    });
+
+    const starting = watcher.start();
+    await attached;
+    watcher.close();
+
+    await expect(starting).resolves.toBe(false);
+    expect(closeRoot).toHaveBeenCalledOnce();
+    expect(closeWorkspaces).toHaveBeenCalledOnce();
+  });
+
   test("closes the root watcher when recursive workspace watch creation fails", async () => {
     fixture = await makeLibraryFixture();
     const closeRoot = vi.fn();

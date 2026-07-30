@@ -17,6 +17,7 @@ import type {
   ReviewStatus,
 } from "../lib/ipc";
 import { resetProjectQuery } from "../lib/media";
+import { SelectMenu } from "./ui/SelectMenu";
 
 interface ProjectControlsProps {
   query: MediaQueryOptions;
@@ -182,35 +183,33 @@ export function ProjectControls({
               </button>
             );
           })}
-          <label className="filter-select-chip">
-            <span>Group ·</span>
-            <select
-              aria-label="Group files"
-              value={query.groupBy}
-              onChange={(event) => update({ groupBy: event.target.value as MediaGroup })}
-            >
-              <option value="none">None</option>
-              <option value="entity">Ralphy</option>
-              <option value="kind">Type</option>
-              <option value="review">Review</option>
-            </select>
-          </label>
-          <label className="filter-select-chip">
-            <span>Sort ·</span>
-            <select
-              aria-label="Sort files"
-              value={query.sortBy}
-              onChange={(event) =>
-                update({ sortBy: event.target.value as MediaQueryOptions["sortBy"] })
-              }
-            >
-              <option value="recent">Recent</option>
-              <option value="name">Name</option>
-              <option value="size">Size</option>
-              <option value="cost">Cost</option>
-              <option value="review">Review</option>
-            </select>
-          </label>
+          <SelectMenu<MediaGroup>
+            value={query.groupBy}
+            ariaLabel="Group files"
+            className="filter-select-chip"
+            prefix="Group ·"
+            options={[
+              { value: "none", label: "None" },
+              { value: "entity", label: "Ralphy" },
+              { value: "kind", label: "Type" },
+              { value: "review", label: "Review" },
+            ]}
+            onValueChange={(groupBy) => update({ groupBy })}
+          />
+          <SelectMenu<MediaQueryOptions["sortBy"]>
+            value={query.sortBy}
+            ariaLabel="Sort files"
+            className="filter-select-chip"
+            prefix="Sort ·"
+            options={[
+              { value: "recent", label: "Recent" },
+              { value: "name", label: "Name" },
+              { value: "size", label: "Size" },
+              { value: "cost", label: "Cost" },
+              { value: "review", label: "Review" },
+            ]}
+            onValueChange={(sortBy) => update({ sortBy })}
+          />
           <label
             className={`filter-chip check-chip${query.includeIntermediate ? " is-active" : ""}`}
           >

@@ -5,6 +5,7 @@ import {
   FolderSearch,
   Trash2,
 } from "lucide-react";
+import { motion } from "motion/react";
 import { useState } from "react";
 import type {
   AnnotationInput,
@@ -52,7 +53,13 @@ export function Inspector({
   };
 
   return (
-    <aside className="inspector">
+    <motion.aside
+      className="inspector panel-blur"
+      initial={{ x: 24, opacity: 0 }}
+      animate={{ x: 0, opacity: 1 }}
+      exit={{ x: 24, opacity: 0 }}
+      transition={{ duration: 0.18, ease: [0.2, 0, 0.2, 1] }}
+    >
       <div className="inspector-file">
         <span className="inspector-file-icon"><File size={16} /></span>
         <span>
@@ -104,6 +111,6 @@ export function Inspector({
           <Trash2 size={13} /> Move to Bin
         </button>
       </div>
-    </aside>
+    </motion.aside>
   );
 }
