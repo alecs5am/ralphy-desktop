@@ -39,3 +39,52 @@ import Testing
     #expect(markdown.contains("tags: slop, bad-motion"))
     #expect(markdown.contains("Hands melt during the courier shot."))
 }
+
+@Test func feedbackIncludesRalphyEntityAndGenerationCost() {
+    let item = mediaItem(
+        entity: .generatedAsset,
+        generation: GenerationAttribution(
+            costUSD: 0.15,
+            provider: "google",
+            model: "gemini-image",
+            generatedAt: Date(timeIntervalSince1970: 10)
+        )
+    )
+    let markdown = AgentFeedback.render(items: [item], annotations: [:])
+
+    #expect(markdown.contains("- entity: generated asset"))
+    #expect(markdown.contains("- generation cost: $0.15"))
+    #expect(markdown.contains("- generation provider/model: google / gemini-image"))
+    #expect(markdown.contains("- generated at: 1970-01-01T00:00:10Z"))
+}
+
+@Test func feedbackEscapesEmbeddedNewlinesInNotes() {
+    let item = mediaItem()
+    let annotation = MediaAnnotation(note: "First line\nSecond line")
+
+    let markdown = AgentFeedback.render(items: [item], annotations: [item.relativePath: annotation])
+
+    #expect(markdown.contains("- note: First line\\nSecond line"))
+    #expect(!markdown.contains("- note: First line\nSecond line"))
+}
+
+private func mediaItem(
+    entity: RalphyEntityKind = .finalRender,
+    generation: GenerationAttribution? = nil
+) -> MediaItem {
+    MediaItem(
+        id: "workspaces/nightmaker/projects/hook/artifacts/images/shot.png",
+        url: URL(filePath: "/tmp/example/.ralphy/workspaces/nightmaker/projects/hook/artifacts/images/shot.png"),
+        relativePath: "workspaces/nightmaker/projects/hook/artifacts/images/shot.png",
+        workspace: "nightmaker",
+        project: "hook",
+        bucket: .image,
+        filename: "shot.png",
+        fileExtension: "png",
+        sizeBytes: 1200,
+        createdAt: nil,
+        modifiedAt: nil,
+        entity: entity,
+        generation: generation
+    )
+}

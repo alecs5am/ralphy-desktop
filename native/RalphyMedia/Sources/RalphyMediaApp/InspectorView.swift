@@ -295,6 +295,7 @@ private func verdictTitle(_ verdict: ReviewVerdict) -> String {
     case .unreviewed: "Unreviewed"
     case .keep: "Keep"
     case .maybe: "Maybe"
+    case .needsWork: "Needs Work"
     case .reject: "Reject"
     }
 }

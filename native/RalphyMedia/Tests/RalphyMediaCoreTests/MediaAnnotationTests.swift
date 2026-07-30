@@ -37,3 +37,10 @@ import Testing
     annotation.rejected = false
     #expect(annotation.verdict == .unreviewed)
 }
+
+@Test func reviewVocabularyPreservesStoredKeepAndMaybeValues() {
+    #expect(ReviewVerdict.keep.rawValue == "keep")
+    #expect(ReviewVerdict.keep.displayName == "Approved")
+    #expect(ReviewVerdict.maybe.displayName == "Shortlist")
+    #expect(ReviewVerdict.needsWork.rawValue == "needs-work")
+}

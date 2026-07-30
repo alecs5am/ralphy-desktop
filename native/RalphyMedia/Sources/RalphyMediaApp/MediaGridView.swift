@@ -483,6 +483,7 @@ private func verdictTitle(_ verdict: ReviewVerdict) -> String {
     case .unreviewed: "Unreviewed"
     case .keep: "Keep"
     case .maybe: "Maybe"
+    case .needsWork: "Needs Work"
     case .reject: "Reject"
     }
 }
@@ -492,6 +493,7 @@ private func verdictSymbol(_ verdict: ReviewVerdict) -> String {
     case .unreviewed: "circle"
     case .keep: "checkmark.circle.fill"
     case .maybe: "questionmark.circle.fill"
+    case .needsWork: "exclamationmark.circle.fill"
     case .reject: "xmark.circle.fill"
     }
 }
@@ -501,6 +503,7 @@ private func verdictColor(_ verdict: ReviewVerdict) -> Color {
     case .unreviewed: .secondary
     case .keep: .green
     case .maybe: .orange
+    case .needsWork: .orange
     case .reject: .red
     }
 }

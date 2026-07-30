@@ -39,6 +39,8 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
     public let sizeBytes: Int64
     public let createdAt: Date?
     public let modifiedAt: Date?
+    public let entity: RalphyEntityKind
+    public let generation: GenerationAttribution?
 
     public init(
         id: String,
@@ -51,7 +53,9 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
         fileExtension: String,
         sizeBytes: Int64,
         createdAt: Date?,
-        modifiedAt: Date?
+        modifiedAt: Date?,
+        entity: RalphyEntityKind = .finalRender,
+        generation: GenerationAttribution? = nil
     ) {
         self.id = id
         self.url = url
@@ -64,6 +68,8 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
         self.sizeBytes = sizeBytes
         self.createdAt = createdAt
         self.modifiedAt = modifiedAt
+        self.entity = entity
+        self.generation = generation
     }
 }
 
@@ -71,7 +77,18 @@ public enum ReviewVerdict: String, Codable, CaseIterable, Hashable, Sendable {
     case unreviewed
     case keep
     case maybe
+    case needsWork = "needs-work"
     case reject
+
+    public var displayName: String {
+        switch self {
+        case .unreviewed: "Unreviewed"
+        case .keep: "Approved"
+        case .maybe: "Shortlist"
+        case .needsWork: "Needs Work"
+        case .reject: "Reject"
+        }
+    }
 }
 
 public struct MediaAnnotation: Codable, Equatable, Sendable {
