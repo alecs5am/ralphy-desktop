@@ -7,12 +7,14 @@ import {
   useReducer,
   useRef,
   useState,
+  type CSSProperties,
 } from "react";
 import { AnimatePresence, LayoutGroup, MotionConfig, motion } from "motion/react";
 import { ContextSidebar } from "./components/ContextSidebar";
 import { Inspector } from "./components/Inspector";
 import { MainHeader } from "./components/Titlebar";
 import { BottomPanel, RightPanelSummary } from "./components/UtilityPanels";
+import { ResizeHandle } from "./components/ui/ResizeHandle";
 import {
   bridge,
   type MediaAnnotation,
@@ -24,6 +26,7 @@ import { WorkspaceScreen } from "./screens/WorkspaceScreen";
 import {
   createInitialWorkbenchState,
   mostRecentWorkspaceId,
+  PANEL_SIZE_LIMITS,
   readWorkbenchPreferences,
   workbenchReducer,
   writeWorkbenchPreferences,
@@ -64,10 +67,25 @@ export function App() {
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(
     initialPreferences.current.workspaceView,
   );
+  const [sidebarWidth, setSidebarWidth] = useState(
+    initialPreferences.current.sidebarWidth,
+  );
+  const [rightPanelWidth, setRightPanelWidth] = useState(
+    initialPreferences.current.rightPanelWidth,
+  );
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(
+    initialPreferences.current.bottomPanelHeight,
+  );
+  const [viewport, setViewport] = useState(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+  const [isResizing, setIsResizing] = useState(false);
   const [sidebarSearchRequest, setSidebarSearchRequest] = useState(0);
   const [includeIntermediate, setIncludeIntermediate] = useState(false);
   const [annotations, setAnnotations] = useState<Record<string, MediaAnnotation>>({});
   const [selectedAsset, setSelectedAsset] = useState<MediaItem | null>(null);
+  const [selectedAssetItems, setSelectedAssetItems] = useState<MediaItem[]>([]);
   const [viewer, setViewer] = useState<{ itemId: string; items: MediaItem[] } | null>(null);
   const projectRequest = useRef(0);
   const annotationRequests = useRef(new Map<string, number>());
@@ -89,6 +107,25 @@ export function App() {
         project.workspaceId === workspaceId && project.projectId === projectId,
     ) ?? null;
   }, [projects, state.route]);
+  const showRightPanel = catalog !== null && rightPanelVisible;
+  const sidebarMax = Math.max(
+    PANEL_SIZE_LIMITS.sidebar.min,
+    Math.min(
+      PANEL_SIZE_LIMITS.sidebar.max,
+      viewport.width - (showRightPanel ? rightPanelWidth : 0) - 440,
+    ),
+  );
+  const rightPanelMax = Math.max(
+    PANEL_SIZE_LIMITS.right.min,
+    Math.min(
+      PANEL_SIZE_LIMITS.right.max,
+      viewport.width - (sidebarVisible ? sidebarWidth : 0) - 440,
+    ),
+  );
+  const bottomPanelMax = Math.max(
+    PANEL_SIZE_LIMITS.bottom.min,
+    Math.min(PANEL_SIZE_LIMITS.bottom.max, viewport.height - 328),
+  );
 
   useEffect(() => {
     const unsubscribe = bridge.onMediaEvent((event) => {
@@ -184,6 +221,7 @@ export function App() {
 
   useEffect(() => {
     setSelectedAsset(null);
+    setSelectedAssetItems([]);
     setViewer(null);
   }, [
     state.route.kind === "project" ? state.route.projectId : null,
@@ -205,23 +243,46 @@ export function App() {
   }, [state.route.kind]);
 
   useEffect(() => {
+    const measure = () => {
+      setViewport({ width: window.innerWidth, height: window.innerHeight });
+    };
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+
+  useEffect(() => {
+    setSidebarWidth((value) => Math.min(value, sidebarMax));
+    setRightPanelWidth((value) => Math.min(value, rightPanelMax));
+    setBottomPanelHeight((value) => Math.min(value, bottomPanelMax));
+  }, [bottomPanelMax, rightPanelMax, sidebarMax]);
+
+  useEffect(() => {
     const workspaceId = state.route.kind === "library" ? null : state.route.workspaceId;
     const projectId = state.route.kind === "project" ? state.route.projectId : null;
-    writeWorkbenchPreferences(localStorage, {
-      rootPath: catalog?.rootPath ?? null,
-      workspaceId,
-      projectId,
-      pinnedWorkspaceIds: state.pinnedWorkspaceIds,
-      pinnedProjectIds: state.pinnedProjectIds,
-      sidebarVisible,
-      rightPanelVisible,
-      bottomPanelVisible,
-      workspaceView,
-    });
+    const timer = window.setTimeout(() => {
+      writeWorkbenchPreferences(localStorage, {
+        rootPath: catalog?.rootPath ?? null,
+        workspaceId,
+        projectId,
+        pinnedWorkspaceIds: state.pinnedWorkspaceIds,
+        pinnedProjectIds: state.pinnedProjectIds,
+        sidebarVisible,
+        rightPanelVisible,
+        bottomPanelVisible,
+        workspaceView,
+        sidebarWidth,
+        rightPanelWidth,
+        bottomPanelHeight,
+      });
+    }, 120);
+    return () => window.clearTimeout(timer);
   }, [
+    bottomPanelHeight,
     bottomPanelVisible,
     catalog?.rootPath,
+    rightPanelWidth,
     rightPanelVisible,
+    sidebarWidth,
     sidebarVisible,
     state.pinnedProjectIds,
     state.pinnedWorkspaceIds,
@@ -242,6 +303,7 @@ export function App() {
         const store = await bridge.loadAnnotations();
         setAnnotations(store.items);
         setSelectedAsset(null);
+        setSelectedAssetItems([]);
         setIncludeIntermediate(false);
       }
     } catch (cause) {
@@ -256,16 +318,28 @@ export function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.metaKey && event.key === "[") {
+      if (event.repeat) return;
+      const key = event.key.toLocaleLowerCase();
+      const command =
+        event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey;
+      const commandOption =
+        event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey;
+      if (command && event.key === "[") {
         event.preventDefault();
         navigateBack();
-      } else if (event.metaKey && event.key === "]") {
+      } else if (command && event.key === "]") {
         event.preventDefault();
         dispatch({ type: "forward" });
-      } else if (event.metaKey && event.key.toLocaleLowerCase() === "f") {
+      } else if (command && key === "f") {
         event.preventDefault();
         setSidebarSearchRequest((request) => request + 1);
-      } else if (event.metaKey && event.key.toLocaleLowerCase() === "b") {
+      } else if (commandOption && key === "b") {
+        event.preventDefault();
+        setRightPanelVisible((visible) => !visible);
+      } else if (command && key === "j") {
+        event.preventDefault();
+        setBottomPanelVisible((visible) => !visible);
+      } else if (command && key === "b") {
         event.preventDefault();
         setSidebarVisible((visible) => !visible);
       }
@@ -295,10 +369,19 @@ export function App() {
   const viewerItem = viewer?.items.find((item) => item.id === viewer.itemId) ?? null;
   const viewerItems = viewer?.items ?? [];
   const breadcrumbs = selectedProject
-    ? [selectedWorkspace?.name ?? "Workspace", selectedProject.name]
+    ? [
+        {
+          label: selectedWorkspace?.name ?? "Workspace",
+          onClick: () => dispatch({
+            type: "open-workspace",
+            workspaceId: selectedProject.workspaceId,
+          }),
+        },
+        { label: selectedProject.name },
+      ]
     : selectedWorkspace
-      ? [selectedWorkspace.name]
-      : ["Workspaces"];
+      ? [{ label: selectedWorkspace.name }]
+      : [{ label: "Workspaces" }];
 
   const updateAnnotation = async (item: MediaItem, input: Parameters<typeof bridge.updateAnnotations>[0][string]) => {
     const request = (annotationRequests.current.get(item.id) ?? 0) + 1;
@@ -329,6 +412,7 @@ export function App() {
     }
     setViewer(null);
     setSelectedAsset(null);
+    setSelectedAssetItems([]);
   };
 
   if (restoring) {
@@ -379,9 +463,13 @@ export function App() {
           loading={projectLoading}
           includeIntermediate={includeIntermediate}
           onIncludeIntermediateChange={setIncludeIntermediate}
-          onSelectAsset={setSelectedAsset}
+          onSelectAsset={(item, visibleItems) => {
+            setSelectedAsset(item);
+            setSelectedAssetItems(item ? visibleItems : []);
+          }}
           onOpenAsset={(item, visibleItems) => {
             setSelectedAsset(item);
+            setSelectedAssetItems(visibleItems);
             setViewer({ itemId: item.id, items: visibleItems });
           }}
         />
@@ -389,7 +477,6 @@ export function App() {
     );
   }
 
-  const showRightPanel = catalog !== null && rightPanelVisible;
   const canGoBack = viewerItem !== null || state.historyIndex > 0;
   const canGoForward = state.historyIndex < state.history.length - 1;
 
@@ -402,7 +489,13 @@ export function App() {
             !sidebarVisible ? " sidebar-collapsed" : "",
             showRightPanel ? " has-right-panel" : "",
             bottomPanelVisible ? " has-bottom-panel" : "",
+            viewerItem ? " viewer-open" : "",
+            isResizing ? " is-resizing" : "",
           ].join("")}
+          style={{
+            "--sidebar-w": `${sidebarWidth}px`,
+            "--inspector-w": `${rightPanelWidth}px`,
+          } as CSSProperties}
         >
           <AnimatePresence initial={false}>
             {catalog && sidebarVisible && (
@@ -430,7 +523,21 @@ export function App() {
               />
             )}
           </AnimatePresence>
-          <motion.section className="main-shell" layout>
+          {catalog && sidebarVisible && (
+            <ResizeHandle
+              ariaLabel="Resize sidebar"
+              orientation="vertical"
+              value={sidebarWidth}
+              min={PANEL_SIZE_LIMITS.sidebar.min}
+              max={sidebarMax}
+              defaultValue={PANEL_SIZE_LIMITS.sidebar.default}
+              direction={1}
+              className="resize-sidebar"
+              onChange={setSidebarWidth}
+              onActiveChange={setIsResizing}
+            />
+          )}
+          <motion.section className="main-shell">
             <MainHeader
               breadcrumbs={breadcrumbs}
               sidebarVisible={sidebarVisible}
@@ -453,10 +560,41 @@ export function App() {
             <div className="main-content-stage">{content}</div>
             <AnimatePresence initial={false}>
               {bottomPanelVisible && (
-                <BottomPanel onClose={() => setBottomPanelVisible(false)} />
+                <>
+                  <ResizeHandle
+                    ariaLabel="Resize bottom panel"
+                    orientation="horizontal"
+                    value={bottomPanelHeight}
+                    min={PANEL_SIZE_LIMITS.bottom.min}
+                    max={bottomPanelMax}
+                    defaultValue={PANEL_SIZE_LIMITS.bottom.default}
+                    direction={-1}
+                    className="resize-bottom"
+                    onChange={setBottomPanelHeight}
+                    onActiveChange={setIsResizing}
+                  />
+                  <BottomPanel
+                    height={bottomPanelHeight}
+                    onClose={() => setBottomPanelVisible(false)}
+                  />
+                </>
               )}
             </AnimatePresence>
           </motion.section>
+          {showRightPanel && (
+            <ResizeHandle
+              ariaLabel="Resize right panel"
+              orientation="vertical"
+              value={rightPanelWidth}
+              min={PANEL_SIZE_LIMITS.right.min}
+              max={rightPanelMax}
+              defaultValue={PANEL_SIZE_LIMITS.right.default}
+              direction={-1}
+              className="resize-right"
+              onChange={setRightPanelWidth}
+              onActiveChange={setIsResizing}
+            />
+          )}
           <AnimatePresence initial={false}>
             {showRightPanel && selectedProject && selectedAsset ? (
               <Inspector
@@ -464,8 +602,15 @@ export function App() {
                 item={selectedAsset}
                 project={selectedProject}
                 annotation={annotations[selectedAsset.id]}
+                previewEnabled={!viewerItem}
                 onChange={(input) => void updateAnnotation(selectedAsset, input)}
                 onTrash={() => void trashSelected()}
+                onOpen={() => setViewer({
+                  itemId: selectedAsset.id,
+                  items: selectedAssetItems.some((item) => item.id === selectedAsset.id)
+                    ? selectedAssetItems
+                    : [selectedAsset],
+                })}
               />
             ) : showRightPanel ? (
               <RightPanelSummary
@@ -477,33 +622,31 @@ export function App() {
             ) : null}
           </AnimatePresence>
           <Suspense fallback={null}>
-            <AnimatePresence initial={false}>
-              {viewerItem && viewer && selectedProject && (
-                <AssetViewer
-                  key="asset-modal"
-                  item={viewerItem}
-                  project={selectedProject}
-                  annotation={annotations[viewerItem.id]}
-                  canPrevious={adjacentMediaItem(viewerItems, viewerItem.id, -1) !== null}
-                  canNext={adjacentMediaItem(viewerItems, viewerItem.id, 1) !== null}
-                  onBack={() => setViewer(null)}
-                  onPrevious={() => {
-                    const item = adjacentMediaItem(viewerItems, viewerItem.id, -1);
-                    if (item) {
-                      setViewer({ itemId: item.id, items: viewerItems });
-                      setSelectedAsset(item);
-                    }
-                  }}
-                  onNext={() => {
-                    const item = adjacentMediaItem(viewerItems, viewerItem.id, 1);
-                    if (item) {
-                      setViewer({ itemId: item.id, items: viewerItems });
-                      setSelectedAsset(item);
-                    }
-                  }}
-                />
-              )}
-            </AnimatePresence>
+            {viewerItem && viewer && selectedProject && (
+              <AssetViewer
+                key="asset-modal"
+                item={viewerItem}
+                project={selectedProject}
+                annotation={annotations[viewerItem.id]}
+                canPrevious={adjacentMediaItem(viewerItems, viewerItem.id, -1) !== null}
+                canNext={adjacentMediaItem(viewerItems, viewerItem.id, 1) !== null}
+                onBack={() => setViewer(null)}
+                onPrevious={() => {
+                  const item = adjacentMediaItem(viewerItems, viewerItem.id, -1);
+                  if (item) {
+                    setViewer({ itemId: item.id, items: viewerItems });
+                    setSelectedAsset(item);
+                  }
+                }}
+                onNext={() => {
+                  const item = adjacentMediaItem(viewerItems, viewerItem.id, 1);
+                  if (item) {
+                    setViewer({ itemId: item.id, items: viewerItems });
+                    setSelectedAsset(item);
+                  }
+                }}
+              />
+            )}
           </Suspense>
           {error && (
             <div className="error-banner" role="alert">

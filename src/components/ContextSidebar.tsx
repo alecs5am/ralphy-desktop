@@ -20,7 +20,7 @@ import {
 } from "../state/workbench";
 import { ProfileAvatar, profileIdentity } from "./ProfileAvatar";
 import { SidebarChrome } from "./Titlebar";
-import { SelectMenu } from "./ui/SelectMenu";
+import { WorkspacePicker } from "./WorkspacePicker";
 
 interface ContextSidebarProps {
   route: WorkbenchRoute;
@@ -173,21 +173,9 @@ export function ContextSidebar({
 
       <div className="sidebar-context">
         {workspace ? (
-          <SelectMenu
+          <WorkspacePicker
             value={workspace.id}
-            ariaLabel="Select workspace"
-            className="workspace-select"
-            options={orderedWorkspaces.map((item) => ({
-              value: item.id,
-              label: item.name,
-              description: item.description || "Ralphy production workspace",
-              meta: `${item.projectCount} projects`,
-              icon: (
-                <span className="workspace-option-avatar">
-                  {initials(item.name)}
-                </span>
-              ),
-            }))}
+            workspaces={orderedWorkspaces}
             onValueChange={onOpenWorkspace}
           />
         ) : (
@@ -196,19 +184,6 @@ export function ContextSidebar({
             <span>{contextName}</span>
           </div>
         )}
-        <button
-          className={`icon-button${searchVisible ? " is-active" : ""}`}
-          type="button"
-          title="Filter projects"
-          aria-label="Filter projects"
-          aria-pressed={searchVisible}
-          onClick={() => {
-            setSearchVisible((visible) => !visible);
-            if (searchVisible) setQuery("");
-          }}
-        >
-          <Search size={16} strokeWidth={1.5} />
-        </button>
       </div>
 
       {(searchVisible || query) && (
@@ -246,7 +221,22 @@ export function ContextSidebar({
 
       <div className="sidebar-section-label">
         <span>Projects</span>
-        <span>{visibleItems.length}</span>
+        <span className="sidebar-section-actions">
+          <span>{visibleItems.length}</span>
+          <button
+            className={`icon-button${searchVisible ? " is-active" : ""}`}
+            type="button"
+            title="Filter projects"
+            aria-label="Filter projects"
+            aria-pressed={searchVisible}
+            onClick={() => {
+              setSearchVisible((visible) => !visible);
+              if (searchVisible) setQuery("");
+            }}
+          >
+            <Search size={14} strokeWidth={1.5} />
+          </button>
+        </span>
       </div>
 
       <div className="sidebar-list">

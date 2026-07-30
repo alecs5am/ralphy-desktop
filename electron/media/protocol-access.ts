@@ -11,6 +11,42 @@ const PREVIEWABLE_KINDS = new Set<MediaKind>(["image", "video", "audio", "pdf"])
 const DEFAULT_MAX_ASSET_BYTES = 8 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_TOKENS = 4096;
 
+export interface MediaByteRange {
+  start: number;
+  end: number;
+}
+
+export interface MintedMedia {
+  token: string;
+  sizeBytes: number;
+}
+
+export function resolveMediaByteRange(
+  value: string | null,
+  size: number,
+): MediaByteRange | null {
+  if (!value) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(value.trim());
+  if (!match || (!match[1] && !match[2]) || size <= 0) return null;
+  if (!match[1]) {
+    const suffix = Number(match[2]);
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) return null;
+    return { start: Math.max(0, size - suffix), end: size - 1 };
+  }
+  const start = Number(match[1]);
+  const requestedEnd = match[2] ? Number(match[2]) : size - 1;
+  if (
+    !Number.isSafeInteger(start)
+    || !Number.isSafeInteger(requestedEnd)
+    || start < 0
+    || start >= size
+    || requestedEnd < start
+  ) {
+    return null;
+  }
+  return { start, end: Math.min(requestedEnd, size - 1) };
+}
+
 export class MediaProtocolAccess {
   readonly #maxAssetBytes: number;
   readonly #maxTokens: number;
@@ -45,14 +81,14 @@ export class MediaProtocolAccess {
     rootPath: string,
     requestedPath: string,
     assertCurrent: () => void = () => undefined,
-  ): Promise<string> {
+  ): Promise<MintedMedia> {
     assertCurrent();
     const path = await this.resolveFile(rootPath, requestedPath);
     assertCurrent();
-    await this.#validatePreview(path);
+    const sizeBytes = await this.#validatePreview(path);
     assertCurrent();
     const existing = this.#tokensByPath.get(path);
-    if (existing) return existing;
+    if (existing) return { token: existing, sizeBytes };
 
     const token = randomUUID();
     this.#pathsByToken.set(token, path);
@@ -63,7 +99,7 @@ export class MediaProtocolAccess {
       this.#pathsByToken.delete(oldest[0]);
       this.#tokensByPath.delete(oldest[1]);
     }
-    return token;
+    return { token, sizeBytes };
   }
 
   async resolve(
@@ -108,11 +144,12 @@ export class MediaProtocolAccess {
     return path;
   }
 
-  async #validatePreview(path: string): Promise<void> {
+  async #validatePreview(path: string): Promise<number> {
     const kind = this.#allowedPaths.get(path);
     if (!kind || !PREVIEWABLE_KINDS.has(kind)) throw new Error("Unsupported media kind");
     const info = await lstat(path);
     if (info.size > this.#maxAssetBytes) throw new Error("Media exceeds the size limit");
+    return info.size;
   }
 }
 

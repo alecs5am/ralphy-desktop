@@ -335,9 +335,12 @@ function createMockBridge(): RalphyBridge {
     },
     async getMediaUrl(path) {
       if (/\.(png|jpe?g|webp)$/i.test(path)) {
-        return "https://images.unsplash.com/photo-1517668808822-9ebb02f2a0e6?auto=format&fit=crop&w=1200&q=85";
+        return {
+          url: "https://images.unsplash.com/photo-1517668808822-9ebb02f2a0e6?auto=format&fit=crop&w=1200&q=85",
+          sizeBytes: 1024,
+        };
       }
-      return path;
+      return { url: path, sizeBytes: 1024 };
     },
   };
 }

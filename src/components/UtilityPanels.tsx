@@ -86,13 +86,20 @@ export function RightPanelSummary({
   );
 }
 
-export function BottomPanel({ onClose }: { onClose(): void }) {
+export function BottomPanel({
+  height,
+  onClose,
+}: {
+  height: number;
+  onClose(): void;
+}) {
   return (
     <motion.section
       className="bottom-panel"
-      initial={{ height: 0, opacity: 0 }}
-      animate={{ height: 220, opacity: 1 }}
-      exit={{ height: 0, opacity: 0 }}
+      style={{ height }}
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 6 }}
       transition={{ duration: 0.2, ease: [0.2, 0, 0.2, 1] }}
     >
       <header className="bottom-panel-header">

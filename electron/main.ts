@@ -20,9 +20,11 @@ import {
 } from "./media/catalog";
 import {
   MEDIA_CHANNELS,
+  MAX_WAVEFORM_DECODE_BYTES,
   type CatalogResult,
   type LibraryOpenResult,
   type MediaEvent,
+  type MediaPreviewSource,
   type ProjectReference,
   type ProjectScanQuery,
   type ProjectScanRequest,
@@ -32,7 +34,10 @@ import {
 } from "./media/types";
 import { LibraryWatcher } from "./media/watcher";
 import { ScanRequestCancelledError } from "./media/worker";
-import { trashAuthorizedItems } from "./media/protocol-access";
+import {
+  resolveMediaByteRange,
+  trashAuthorizedItems,
+} from "./media/protocol-access";
 import { guardedAtomicWrite } from "./media/atomic-write";
 import {
   ActiveRootResource,
@@ -375,11 +380,15 @@ function beginOpenOperation(): MediaSessionEpoch {
 async function mediaUrl(
   operation: ActiveMediaSession,
   path: string,
-): Promise<string> {
+): Promise<MediaPreviewSource> {
   const assertCurrent = (): void => mediaState.assertActive(operation);
-  const token = await mediaState.fileAccess.mint(operation.rootPath, path, assertCurrent);
+  const { token, sizeBytes } = await mediaState.fileAccess.mint(
+    operation.rootPath,
+    path,
+    assertCurrent,
+  );
   assertCurrent();
-  return `ralphy-media://asset/${token}`;
+  return { url: `ralphy-media://asset/${token}`, sizeBytes };
 }
 
 function registerMediaIpc(): void {
@@ -530,6 +539,7 @@ function createWindow(): void {
     minWidth: 1100,
     minHeight: 720,
     titleBarStyle: "hiddenInset",
+    trafficLightPosition: { x: 16, y: 18 },
     vibrancy: "sidebar",
     visualEffectState: "active",
     backgroundColor: "#00000000",
@@ -618,9 +628,50 @@ void app.whenReady().then(() => {
         assertCurrent,
       );
       assertCurrent();
-      const response = await net.fetch(pathToFileURL(safePath).toString());
+      const info = await stat(safePath);
       assertCurrent();
-      return response;
+      if (
+        url.searchParams.get("purpose") === "waveform"
+        && info.size > MAX_WAVEFORM_DECODE_BYTES
+      ) {
+        return new Response("Waveform source exceeds the decode limit", {
+          status: 413,
+        });
+      }
+      const requestedRange = request.headers.get("range");
+      const range = resolveMediaByteRange(requestedRange, info.size);
+      if (requestedRange !== null && range === null) {
+        return new Response(null, {
+          status: 416,
+          headers: {
+            "Accept-Ranges": "bytes",
+            "Content-Range": `bytes */${info.size}`,
+          },
+        });
+      }
+      const response = await net.fetch(pathToFileURL(safePath).toString(), {
+        headers: range
+          ? { Range: `bytes=${range.start}-${range.end}` }
+          : undefined,
+      });
+      assertCurrent();
+      const headers = new Headers(response.headers);
+      headers.set("Accept-Ranges", "bytes");
+      headers.set(
+        "Content-Length",
+        String(range ? range.end - range.start + 1 : info.size),
+      );
+      if (range) {
+        headers.set(
+          "Content-Range",
+          `bytes ${range.start}-${range.end}/${info.size}`,
+        );
+      }
+      return new Response(response.body, {
+        status: range ? 206 : response.status,
+        statusText: range ? "Partial Content" : response.statusText,
+        headers,
+      });
     } catch {
       return new Response("Forbidden", { status: 403 });
     }

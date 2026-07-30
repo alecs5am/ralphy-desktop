@@ -15,14 +15,17 @@ import type {
 } from "../lib/ipc";
 import { bridge } from "../lib/ipc";
 import { formatAgentFeedback } from "../lib/agent-feedback";
+import { InspectorPreview } from "./InspectorPreview";
 import { ReviewControls } from "./ReviewControls";
 
 interface InspectorProps {
   item: MediaItem;
   project: ProjectSummary;
   annotation?: MediaAnnotation;
+  previewEnabled?: boolean;
   onChange(annotation: AnnotationInput): void;
   onTrash(): void;
+  onOpen(): void;
 }
 
 function Property({ label, children }: { label: string; children: React.ReactNode }) {
@@ -38,8 +41,10 @@ export function Inspector({
   item,
   project,
   annotation,
+  previewEnabled = true,
   onChange,
   onTrash,
+  onOpen,
 }: InspectorProps) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const copyForAgent = async () => {
@@ -60,6 +65,8 @@ export function Inspector({
       exit={{ x: 24, opacity: 0 }}
       transition={{ duration: 0.18, ease: [0.2, 0, 0.2, 1] }}
     >
+      {previewEnabled ? <InspectorPreview item={item} onOpen={onOpen} /> : null}
+
       <div className="inspector-file">
         <span className="inspector-file-icon"><File size={16} /></span>
         <span>

@@ -128,7 +128,12 @@
   .workspace-project-card,
   .bottom-panel,
   .utility-right-panel,
-  .profile-avatar {
+  .profile-avatar,
+  .workspace-picker-popover,
+  .workspace-picker-trigger,
+  .video-controls,
+  .image-zoom-controls,
+  .inspector-preview {
     corner-shape: squircle;
   }
 }

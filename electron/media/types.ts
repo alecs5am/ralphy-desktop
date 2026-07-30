@@ -78,6 +78,13 @@ export interface MediaItem extends ProjectReference {
   generation: GenerationAttribution | null;
 }
 
+export interface MediaPreviewSource {
+  url: string;
+  sizeBytes: number;
+}
+
+export const MAX_WAVEFORM_DECODE_BYTES = 24 * 1024 * 1024;
+
 export interface MediaAnnotation {
   reviewStatus: ReviewStatus;
   favorite: boolean;
@@ -204,7 +211,7 @@ export interface MediaWorkbenchBridge {
   openExternal(path: string): Promise<string>;
   copyText(text: string): Promise<void>;
   readText(path: string, maxBytes?: number): Promise<TextReadResult>;
-  getMediaUrl(path: string): Promise<string>;
+  getMediaUrl(path: string): Promise<MediaPreviewSource>;
 }
 
 export const MEDIA_CHANNELS = {

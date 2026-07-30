@@ -23,6 +23,9 @@ export interface WorkbenchPreferences {
   rightPanelVisible: boolean;
   bottomPanelVisible: boolean;
   workspaceView: WorkspaceView;
+  sidebarWidth: number;
+  rightPanelWidth: number;
+  bottomPanelHeight: number;
 }
 
 export interface WorkbenchState {
@@ -51,6 +54,12 @@ export type WorkbenchAction =
   | { type: "toggle-project-pin"; projectId: string };
 
 const PREFERENCES_KEY = "ralphy-media-workbench-v1";
+
+export const PANEL_SIZE_LIMITS = {
+  sidebar: { min: 220, max: 420, default: 288 },
+  right: { min: 280, max: 520, default: 336 },
+  bottom: { min: 160, max: 480, default: 220 },
+} as const;
 
 export function createInitialWorkbenchState(
   preferences?: Partial<WorkbenchPreferences>,
@@ -286,6 +295,14 @@ function strings(value: unknown): string[] {
     : [];
 }
 
+function panelSize(
+  value: unknown,
+  limits: { min: number; max: number; default: number },
+): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return limits.default;
+  return Math.min(limits.max, Math.max(limits.min, Math.round(value)));
+}
+
 export function readWorkbenchPreferences(storage: StorageLike): WorkbenchPreferences {
   const empty: WorkbenchPreferences = {
     rootPath: null,
@@ -297,6 +314,9 @@ export function readWorkbenchPreferences(storage: StorageLike): WorkbenchPrefere
     rightPanelVisible: false,
     bottomPanelVisible: false,
     workspaceView: "grid",
+    sidebarWidth: PANEL_SIZE_LIMITS.sidebar.default,
+    rightPanelWidth: PANEL_SIZE_LIMITS.right.default,
+    bottomPanelHeight: PANEL_SIZE_LIMITS.bottom.default,
   };
   try {
     const value = JSON.parse(storage.getItem(PREFERENCES_KEY) ?? "null") as unknown;
@@ -315,6 +335,9 @@ export function readWorkbenchPreferences(storage: StorageLike): WorkbenchPrefere
       bottomPanelVisible:
         typeof record.bottomPanelVisible === "boolean" ? record.bottomPanelVisible : false,
       workspaceView: record.workspaceView === "list" ? "list" : "grid",
+      sidebarWidth: panelSize(record.sidebarWidth, PANEL_SIZE_LIMITS.sidebar),
+      rightPanelWidth: panelSize(record.rightPanelWidth, PANEL_SIZE_LIMITS.right),
+      bottomPanelHeight: panelSize(record.bottomPanelHeight, PANEL_SIZE_LIMITS.bottom),
     };
   } catch {
     return empty;

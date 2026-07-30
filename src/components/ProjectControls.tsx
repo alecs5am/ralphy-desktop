@@ -18,6 +18,7 @@ import type {
 } from "../lib/ipc";
 import { resetProjectQuery } from "../lib/media";
 import { SelectMenu } from "./ui/SelectMenu";
+import { SnappySlider } from "./ui/SnappySlider";
 
 interface ProjectControlsProps {
   query: MediaQueryOptions;
@@ -126,18 +127,19 @@ export function ProjectControls({
             </button>
             <div className="project-toolbar-tail">
               <span className="item-count">{itemCount.toLocaleString()} items</span>
-              <label className="grid-size-control" title="Grid size">
+              <div className="grid-size-control" title="Grid size">
                 <GalleryHorizontalEnd size={15} strokeWidth={1.5} />
-                <input
-                  type="range"
-                  min="150"
-                  max="310"
-                  step="20"
+                <SnappySlider
                   value={gridSize}
-                  aria-label="Grid size"
-                  onChange={(event) => onGridSizeChange(Number(event.target.value))}
+                  min={150}
+                  max={310}
+                  step={20}
+                  values={[150, 170, 190, 210, 230, 250, 270, 290, 310]}
+                  defaultValue={230}
+                  ariaLabel="Grid size"
+                  onValueChange={onGridSizeChange}
                 />
-              </label>
+              </div>
             </div>
           </>
         )}

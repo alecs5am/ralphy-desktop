@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   MediaProtocolAccess,
+  resolveMediaByteRange,
   trashAuthorizedItems,
 } from "../electron/media/protocol-access";
 import { scanProject } from "../electron/media/project-scanner";
@@ -17,6 +18,34 @@ afterEach(async () => {
 });
 
 describe("media protocol access", () => {
+  test("resolves bounded, open-ended, and suffix byte ranges", () => {
+    expect(resolveMediaByteRange(null, 4096)).toBeNull();
+    expect(resolveMediaByteRange("bytes=1024-2047", 4096)).toEqual({
+      start: 1024,
+      end: 2047,
+    });
+    expect(resolveMediaByteRange("bytes=1024-", 4096)).toEqual({
+      start: 1024,
+      end: 4095,
+    });
+    expect(resolveMediaByteRange("bytes=-500", 4096)).toEqual({
+      start: 3596,
+      end: 4095,
+    });
+    expect(resolveMediaByteRange("bytes=4000-9999", 4096)).toEqual({
+      start: 4000,
+      end: 4095,
+    });
+  });
+
+  test("rejects malformed and unsatisfiable byte ranges", () => {
+    expect(resolveMediaByteRange("bytes=4096-", 4096)).toBeNull();
+    expect(resolveMediaByteRange("bytes=10-9", 4096)).toBeNull();
+    expect(resolveMediaByteRange("bytes=0-1,4-5", 4096)).toBeNull();
+    expect(resolveMediaByteRange("items=0-1", 4096)).toBeNull();
+    expect(resolveMediaByteRange("bytes=-0", 4096)).toBeNull();
+  });
+
   test("mints and resolves only current selected-project media", async () => {
     fixture = await makeLibraryFixture();
     const access = new MediaProtocolAccess({ maxAssetBytes: 1024 });
@@ -29,7 +58,8 @@ describe("media protocol access", () => {
     access.replace(alpha);
 
     const mediaPath = join(fixture.alphaPath, "artifacts", "images", "hero.png");
-    const token = await access.mint(fixture.rootPath, mediaPath);
+    const { token, sizeBytes } = await access.mint(fixture.rootPath, mediaPath);
+    expect(sizeBytes).toBeGreaterThan(0);
     expect(await access.resolve(fixture.rootPath, token)).toBe(
       alpha.items.find((item) => item.projectRelativePath === "artifacts/images/hero.png")
         ?.absolutePath,
@@ -66,6 +96,9 @@ describe("media protocol access", () => {
       access.mint(fixture.rootPath, join(fixture.alphaPath, "BRIEF.md")),
     ).rejects.toThrow(/media kind/i);
     const mediaPath = join(fixture.alphaPath, "artifacts", "images", "hero.png");
+    await writeFile(mediaPath, "x".repeat(7));
+    const minted = await access.mint(fixture.rootPath, mediaPath);
+    expect(minted.sizeBytes).toBe(7);
     await writeFile(mediaPath, "x".repeat(9));
     await expect(access.mint(fixture.rootPath, mediaPath)).rejects.toThrow(/size limit/i);
   });

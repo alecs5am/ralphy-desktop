@@ -35,7 +35,7 @@ interface ProjectScreenProps {
   includeIntermediate: boolean;
   onIncludeIntermediateChange(value: boolean): void;
   onOpenAsset(item: MediaItem, visibleItems: MediaItem[]): void;
-  onSelectAsset(item: MediaItem | null): void;
+  onSelectAsset(item: MediaItem | null, visibleItems: MediaItem[]): void;
 }
 
 const overviewSections: Array<{
@@ -107,12 +107,12 @@ export function ProjectScreen({
     }
     setQuery(next);
     setSelectedId(null);
-    onSelectAsset(null);
+    onSelectAsset(null, []);
   };
 
   const selectAsset = (item: MediaItem) => {
     setSelectedId(item.id);
-    onSelectAsset(item);
+    onSelectAsset(item, visibleItems);
   };
 
   const copyForAgent = async () => {

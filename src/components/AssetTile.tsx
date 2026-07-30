@@ -58,9 +58,9 @@ function Preview({ item }: { item: MediaItem }) {
       }
       releaseRef.current = release;
       try {
-        const mediaUrl = await bridge.getMediaUrl(item.absolutePath);
+        const mediaSource = await bridge.getMediaUrl(item.absolutePath);
         if (disposed) release();
-        else setUrl(mediaUrl);
+        else setUrl(mediaSource.url);
       } catch {
         release();
       }

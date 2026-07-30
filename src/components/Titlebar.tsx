@@ -1,15 +1,14 @@
 import {
   ArrowLeft,
   ArrowRight,
+  ChevronRight,
   Folder,
   FolderOpen,
-  MoreHorizontal,
   PanelBottom,
   PanelLeft,
   PanelRight,
 } from "lucide-react";
 import { motion } from "motion/react";
-import { useState } from "react";
 
 interface SidebarChromeProps {
   canGoBack: boolean;
@@ -68,7 +67,7 @@ export function SidebarChrome({
 }
 
 interface MainHeaderProps {
-  breadcrumbs: string[];
+  breadcrumbs: Array<{ label: string; onClick?: () => void }>;
   sidebarVisible: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
@@ -98,7 +97,6 @@ export function MainHeader({
   onToggleRightPanel,
   onToggleBottomPanel,
 }: MainHeaderProps) {
-  const [actionsOpen, setActionsOpen] = useState(false);
   return (
     <motion.header className="main-header" layout>
       {!sidebarVisible && (
@@ -139,9 +137,19 @@ export function MainHeader({
       <Folder size={16} strokeWidth={1.5} aria-hidden="true" />
       <nav className="breadcrumbs" aria-label="Current location">
         {breadcrumbs.map((crumb, index) => (
-          <span className="breadcrumb" key={`${crumb}-${index}`}>
-            {index > 0 && <span className="breadcrumb-separator">/</span>}
-            <span>{crumb}</span>
+          <span className="breadcrumb" key={`${crumb.label}-${index}`}>
+            {index > 0 && <ChevronRight className="breadcrumb-separator" size={13} />}
+            {crumb.onClick ? (
+              <button
+                className="breadcrumb-button"
+                type="button"
+                onClick={crumb.onClick}
+              >
+                {crumb.label}
+              </button>
+            ) : (
+              <span>{crumb.label}</span>
+            )}
           </span>
         ))}
       </nav>
@@ -157,54 +165,25 @@ export function MainHeader({
             <FolderOpen size={15} strokeWidth={1.5} />
           </button>
         )}
-        {!showChooseLibrary && (
-          <div className="header-actions-menu-wrap">
-            <button
-              className={`icon-button${actionsOpen ? " is-active" : ""}`}
-              type="button"
-              title="Library actions"
-              aria-label="Library actions"
-              aria-expanded={actionsOpen}
-              onClick={() => setActionsOpen((open) => !open)}
-            >
-              <MoreHorizontal size={16} strokeWidth={1.5} />
-            </button>
-            {actionsOpen && (
-              <div className="header-actions-menu" role="menu">
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setActionsOpen(false);
-                    onChooseLibrary();
-                  }}
-                >
-                  <FolderOpen size={14} strokeWidth={1.5} />
-                  Change library
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-        <button
-          className={`icon-button${rightPanelVisible ? " is-active" : ""}`}
-          type="button"
-          title="Toggle right panel"
-          aria-label="Toggle right panel"
-          aria-pressed={rightPanelVisible}
-          onClick={onToggleRightPanel}
-        >
-          <PanelRight size={16} strokeWidth={1.5} />
-        </button>
         <button
           className={`icon-button${bottomPanelVisible ? " is-active" : ""}`}
           type="button"
-          title="Toggle bottom panel"
+          title="Toggle bottom panel (⌘J)"
           aria-label="Toggle bottom panel"
           aria-pressed={bottomPanelVisible}
           onClick={onToggleBottomPanel}
         >
           <PanelBottom size={16} strokeWidth={1.5} />
+        </button>
+        <button
+          className={`icon-button${rightPanelVisible ? " is-active" : ""}`}
+          type="button"
+          title="Toggle right panel (⌘⌥B)"
+          aria-label="Toggle right panel"
+          aria-pressed={rightPanelVisible}
+          onClick={onToggleRightPanel}
+        >
+          <PanelRight size={16} strokeWidth={1.5} />
         </button>
       </div>
     </motion.header>
