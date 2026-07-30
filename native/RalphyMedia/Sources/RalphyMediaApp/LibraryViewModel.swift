@@ -912,7 +912,7 @@ final class LibraryViewModel: ObservableObject {
 
     private func startWatching(root: URL) {
         watcher?.stop()
-        watcher = FolderWatcher(root: root) { [weak self] in
+        watcher = FolderWatcher(root: root) { [weak self] _ in
             guard self?.desiredContext?.root == root else { return }
             self?.requestScan()
         }

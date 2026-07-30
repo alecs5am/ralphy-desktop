@@ -1,5 +1,6 @@
 import CoreServices
 import Foundation
+import RalphyMediaCore
 
 final class FolderWatcher {
     private let workspacesURL: URL
@@ -9,7 +10,7 @@ final class FolderWatcher {
 
     init(
         root: URL,
-        onChange: @escaping @MainActor @Sendable () -> Void
+        onChange: @escaping @MainActor @Sendable ([String]) -> Void
     ) {
         self.workspacesURL = root.appending(path: "workspaces")
         self.onChange = MainActorCallback(action: onChange)
@@ -30,10 +31,14 @@ final class FolderWatcher {
             copyDescription: nil
         )
 
-        let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+        let callback: FSEventStreamCallback = { _, info, eventCount, eventPaths, _, _ in
             guard let info else { return }
             let watcher = Unmanaged<FolderWatcher>.fromOpaque(info).takeUnretainedValue()
-            watcher.onChange.call()
+            let paths = Unmanaged<CFArray>.fromOpaque(eventPaths)
+                .takeUnretainedValue() as? [String] ?? []
+            watcher.onChange.call(paths.prefix(Int(eventCount)).map {
+                URL(filePath: $0).standardizedFileURL.path
+            })
         }
 
         stream = FSEventStreamCreate(
@@ -62,11 +67,64 @@ final class FolderWatcher {
 }
 
 private struct MainActorCallback: Sendable {
-    let action: @MainActor @Sendable () -> Void
+    let action: @MainActor @Sendable ([String]) -> Void
 
-    func call() {
+    func call(_ paths: [String]) {
+        var seen = Set<String>()
+        let paths = paths.filter { seen.insert($0).inserted }
+        guard !paths.isEmpty else { return }
         Task { @MainActor in
-            action()
+            action(paths)
         }
+    }
+}
+
+struct FolderChangeSet: Equatable, Sendable {
+    let projects: [ProjectReference]
+    let catalogStructureChanged: Bool
+}
+
+enum FolderChangeRouter {
+    static func route(paths: [String], root: URL) -> FolderChangeSet {
+        let rootComponents = root.standardizedFileURL.pathComponents
+        var projects: [ProjectReference] = []
+        var seenProjects = Set<ProjectReference>()
+        var catalogStructureChanged = false
+
+        for path in paths {
+            let components = URL(filePath: path).standardizedFileURL.pathComponents
+            guard components.starts(with: rootComponents) else { continue }
+            let relative = Array(components.dropFirst(rootComponents.count))
+
+            guard let first = relative.first else {
+                catalogStructureChanged = true
+                continue
+            }
+            if first == "media-library" {
+                continue
+            }
+            guard first == "workspaces" else {
+                catalogStructureChanged = true
+                continue
+            }
+            guard relative.count >= 3, relative[2] == "projects" else {
+                catalogStructureChanged = true
+                continue
+            }
+            guard relative.count >= 5 else {
+                catalogStructureChanged = true
+                continue
+            }
+
+            let project = ProjectReference(workspaceID: relative[1], projectID: relative[3])
+            if seenProjects.insert(project).inserted {
+                projects.append(project)
+            }
+        }
+
+        return FolderChangeSet(
+            projects: projects,
+            catalogStructureChanged: catalogStructureChanged
+        )
     }
 }

@@ -15,6 +15,13 @@ struct AppSettings {
         static let excludeRejected = "mediaExcludeRejected"
         static let includeIntermediates = "includeMediaIntermediates"
         static let inspectorVisible = "mediaInspectorVisible"
+        static let selectedWorkspaceID = "selectedWorkspaceID"
+        static let selectedProjectID = "selectedProjectID"
+        static let projectMode = "projectMode"
+        static let workspaceSort = "workspaceSort"
+        static let pinnedWorkspaceIDs = "pinnedWorkspaceIDs"
+        static let pinnedProjectIDs = "pinnedProjectIDs"
+        static let sidebarWidth = "sidebarWidth"
     }
 
     private let defaults: UserDefaults
@@ -113,5 +120,56 @@ struct AppSettings {
         nonmutating set {
             defaults.set(newValue, forKey: Key.inspectorVisible)
         }
+    }
+
+    var selectedWorkspaceID: String? {
+        get { defaults.string(forKey: Key.selectedWorkspaceID) }
+        nonmutating set { defaults.set(newValue, forKey: Key.selectedWorkspaceID) }
+    }
+
+    var selectedProjectID: String? {
+        get { defaults.string(forKey: Key.selectedProjectID) }
+        nonmutating set { defaults.set(newValue, forKey: Key.selectedProjectID) }
+    }
+
+    var projectMode: ProjectMode {
+        get {
+            defaults.string(forKey: Key.projectMode).flatMap(ProjectMode.init(rawValue:)) ?? .overview
+        }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Key.projectMode) }
+    }
+
+    var workspaceSort: MediaSort {
+        get {
+            defaults.string(forKey: Key.workspaceSort).flatMap(MediaSort.init(rawValue:)) ?? .name
+        }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Key.workspaceSort) }
+    }
+
+    var pinnedWorkspaceIDs: Set<String> {
+        get { storedSet(forKey: Key.pinnedWorkspaceIDs) }
+        nonmutating set { store(newValue, forKey: Key.pinnedWorkspaceIDs) }
+    }
+
+    var pinnedProjectIDs: Set<ProjectReference> {
+        get { storedSet(forKey: Key.pinnedProjectIDs) }
+        nonmutating set { store(newValue, forKey: Key.pinnedProjectIDs) }
+    }
+
+    var sidebarWidth: Double {
+        get {
+            guard defaults.object(forKey: Key.sidebarWidth) != nil else { return 280 }
+            return defaults.double(forKey: Key.sidebarWidth)
+        }
+        nonmutating set { defaults.set(newValue, forKey: Key.sidebarWidth) }
+    }
+
+    private func storedSet<Value: Decodable>(forKey key: String) -> Set<Value> {
+        guard let data = defaults.data(forKey: key) else { return [] }
+        return (try? JSONDecoder().decode(Set<Value>.self, from: data)) ?? []
+    }
+
+    private func store<Value: Encodable>(_ value: Set<Value>, forKey key: String) {
+        defaults.set(try? JSONEncoder().encode(value), forKey: key)
     }
 }
