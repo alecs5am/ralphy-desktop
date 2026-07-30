@@ -140,7 +140,7 @@ public struct WorkspaceCatalogScanner: Sendable {
     private func scanProjects(
         in workspaceURL: URL,
         workspaceID: String,
-        registry: [String: RegistryProject],
+        registry: [ProjectReference: RegistryProject],
         warnings: inout [String]
     ) -> [ProjectSummary] {
         let projectsURL = workspaceURL.appending(path: "projects")
@@ -150,15 +150,21 @@ public struct WorkspaceCatalogScanner: Sendable {
         for projectURL in directoryChildren(of: projectsURL, warnings: &warnings) {
             guard let metadata = try? fileSystem.metadata(projectURL), metadata.isDirectory else { continue }
             let projectID = projectURL.lastPathComponent
-            let record = registry[projectID]
+            let reference = ProjectReference(workspaceID: workspaceID, projectID: projectID)
+            let record = registry[reference]
             let directChildren = directoryChildren(of: projectURL, warnings: &warnings)
             let childNames = Set(directChildren.map(\.lastPathComponent))
             let hasFinalRender = hasFinalRender(at: projectURL)
             let logDate = modificationDate(at: projectURL.appending(path: "logs/generations.jsonl"))
-            let fallbackActivity = ([metadata.modificationDate, record?.updatedAt, record?.createdAt]).compactMap { $0 }.max()
+            let lastActivityAt = ([
+                logDate,
+                metadata.modificationDate,
+                record?.updatedAt,
+                record?.createdAt,
+            ]).compactMap { $0 }.max()
 
             projects.append(ProjectSummary(
-                id: ProjectReference(workspaceID: workspaceID, projectID: projectID),
+                id: reference,
                 name: record?.name ?? projectID,
                 brief: record?.brief,
                 status: record?.status,
@@ -166,7 +172,7 @@ public struct WorkspaceCatalogScanner: Sendable {
                     childNames: childNames,
                     hasFinalRender: hasFinalRender
                 ),
-                lastActivityAt: logDate ?? fallbackActivity,
+                lastActivityAt: lastActivityAt,
                 hasFinalRender: hasFinalRender,
                 unitCount: childNames.contains("units") ? 1 : 0,
                 knownSpendUSD: record?.knownSpendUSD
@@ -208,10 +214,18 @@ public struct WorkspaceCatalogScanner: Sendable {
         }
     }
 
-    private func readRegistry(at url: URL, warnings: inout [String]) -> [String: RegistryProject] {
+    private func readRegistry(at url: URL, warnings: inout [String]) -> [ProjectReference: RegistryProject] {
         guard let data = readData(at: url, warnings: &warnings) else { return [:] }
         do {
-            return try JSONDecoder.ralphy.decode(Registry.self, from: data).projects ?? [:]
+            let registry = try JSONDecoder.ralphy.decode(Registry.self, from: data)
+            if registry.malformedProjectCount > 0 {
+                warnings.append("Skipped \(registry.malformedProjectCount) malformed registry project entries.")
+            }
+            return registry.projects.reduce(into: [:]) { records, entry in
+                let projectID = entry.value.id ?? entry.key
+                guard let workspaceID = entry.value.workspace else { return }
+                records[ProjectReference(workspaceID: workspaceID, projectID: projectID)] = entry.value
+            }
         } catch {
             warnings.append("Could not read registry.json.")
             return [:]
@@ -291,7 +305,48 @@ public struct WorkspaceCatalogScanner: Sendable {
 }
 
 private struct Registry: Decodable {
-    let projects: [String: RegistryProject]?
+    let projects: [String: RegistryProject]
+    let malformedProjectCount: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case projects
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard container.contains(.projects) else {
+            projects = [:]
+            malformedProjectCount = 0
+            return
+        }
+        let projectContainer = try container.nestedContainer(keyedBy: RegistryProjectKey.self, forKey: .projects)
+        var projects: [String: RegistryProject] = [:]
+        var malformedProjectCount = 0
+        for key in projectContainer.allKeys {
+            do {
+                projects[key.stringValue] = try projectContainer.decode(RegistryProject.self, forKey: key)
+            } catch {
+                malformedProjectCount += 1
+            }
+        }
+        self.projects = projects
+        self.malformedProjectCount = malformedProjectCount
+    }
+}
+
+private struct RegistryProjectKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
+    }
 }
 
 private struct RegistryProject: Decodable {
