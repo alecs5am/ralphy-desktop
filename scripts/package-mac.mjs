@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
   cp,
+  chmod,
   mkdir,
   rename,
   rm,
@@ -29,6 +30,14 @@ await cp(join(root, "dist"), join(application, "dist"), { recursive: true });
 await cp(join(root, "dist-electron"), join(application, "dist-electron"), {
   recursive: true,
 });
+const packagedNodePty = join(application, "node_modules/node-pty");
+await mkdir(join(application, "node_modules"), { recursive: true });
+await cp(join(root, "node_modules/node-pty"), packagedNodePty, {
+  recursive: true,
+});
+for (const architecture of ["darwin-arm64", "darwin-x64"]) {
+  await chmod(join(packagedNodePty, "prebuilds", architecture, "spawn-helper"), 0o755);
+}
 await writeFile(
   join(application, "package.json"),
   JSON.stringify({
@@ -39,6 +48,10 @@ await writeFile(
   }, null, 2),
 );
 await cp(join(root, "build/RalphyMedia.icns"), join(resources, "RalphyMedia.icns"));
+await cp(
+  join(root, "build/RalphyMedia.iconset/icon_128x128.png"),
+  join(resources, "RalphyMedia-drag.png"),
+);
 
 const plist = join(contents, "Info.plist");
 const replace = (key, type, value) => {

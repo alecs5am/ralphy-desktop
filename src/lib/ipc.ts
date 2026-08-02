@@ -1,7 +1,10 @@
 import type {
   AnnotationInput,
   AnnotationStore,
+  AgentChatEnvelope,
+  AgentChatRequest,
   CatalogResult,
+  ClaudeAuthState,
   GenerationAttribution,
   LibraryOpenResult,
   MediaEntity,
@@ -13,13 +16,26 @@ import type {
   ProjectScanQuery,
   ProjectScanResult,
   ProjectSummary,
+  TerminalDimensions,
+  TerminalEvent,
+  TerminalSession,
   WorkspaceSummary,
 } from "../../electron/media/types";
 
 export type {
+  AgentChatEnvelope,
+  AgentChatEvent,
+  AgentChatRequest,
+  AgentModelOption,
+  AgentPermissionMode,
+  AgentProvider,
+  AgentProviderStatus,
   AnnotationInput,
   AnnotationStore,
   CatalogResult,
+  ClaudeAuthMethod,
+  ClaudeAuthState,
+  ClaudePermissionMode,
   GenerationAttribution,
   LibraryOpenResult,
   MediaAnnotation,
@@ -38,6 +54,9 @@ export type {
   ProjectSummary,
   ReviewStatus,
   TextReadResult,
+  TerminalDimensions,
+  TerminalEvent,
+  TerminalSession,
   TrashResult,
   WorkspaceSummary,
 } from "../../electron/media/types";
@@ -239,6 +258,16 @@ function mockCatalog(generation = 1): CatalogResult {
 
 function createMockBridge(): RalphyBridge {
   const mediaCallbacks = new Set<(event: MediaEvent) => void>();
+  const terminalCallbacks = new Set<(event: TerminalEvent) => void>();
+  const agentCallbacks = new Set<(event: AgentChatEnvelope) => void>();
+  let openRouterConfigured = false;
+  let claudeAuth: ClaudeAuthState = {
+    binaryReady: true,
+    subscriptionLoggedIn: true,
+    subscriptionAuthMethod: "claude.ai",
+    apiKeyConfigured: false,
+    inheritedApiKey: false,
+  };
   let annotations: AnnotationStore = {
     version: 1,
     items: {
@@ -322,6 +351,7 @@ function createMockBridge(): RalphyBridge {
     async openExternal() {
       return "";
     },
+    startFileDrag() {},
     async copyText() {},
     async readText(path, maxBytes = 256 * 1024) {
       const text = path.endsWith("BRIEF.md")
@@ -341,6 +371,138 @@ function createMockBridge(): RalphyBridge {
         };
       }
       return { url: path, sizeBytes: 1024 };
+    },
+    async createTerminal(dimensions: TerminalDimensions): Promise<TerminalSession> {
+      const session: TerminalSession = {
+        id: `mock-terminal-${Date.now()}`,
+        cwd: MOCK_ROOT,
+        shell: "/bin/zsh",
+        pid: 4242,
+        status: "running",
+      };
+      queueMicrotask(() => {
+        for (const callback of terminalCallbacks) {
+          callback({
+            type: "data",
+            sessionId: session.id,
+            data: `\u001b[36m${MOCK_ROOT}\u001b[0m\n❯ `,
+          });
+        }
+      });
+      void dimensions;
+      return session;
+    },
+    writeTerminal(sessionId, data) {
+      for (const callback of terminalCallbacks) {
+        callback({ type: "data", sessionId, data });
+      }
+    },
+    resizeTerminal() {},
+    async killTerminal(sessionId) {
+      for (const callback of terminalCallbacks) {
+        callback({ type: "exit", sessionId, exitCode: 0, signal: 0 });
+      }
+    },
+    onTerminalEvent(callback) {
+      terminalCallbacks.add(callback);
+      return () => terminalCallbacks.delete(callback);
+    },
+    async getAgentProviders() {
+      return [
+        {
+          id: "claude" as const,
+          label: "Claude",
+          binaryReady: true,
+          accountConnected: claudeAuth.subscriptionLoggedIn,
+          apiKeyConfigured: claudeAuth.apiKeyConfigured,
+          inheritedApiKey: false,
+          connected: claudeAuth.subscriptionLoggedIn || claudeAuth.apiKeyConfigured,
+          detail: "Claude account",
+          models: [
+            { id: "opus", label: "Claude Opus", description: "Highest capability" },
+            { id: "sonnet", label: "Claude Sonnet", description: "Balanced" },
+            { id: "fable", label: "Claude Fable", description: "Fast" },
+          ],
+          defaultModel: "sonnet",
+        },
+        {
+          id: "codex" as const,
+          label: "Codex",
+          binaryReady: true,
+          accountConnected: true,
+          apiKeyConfigured: false,
+          inheritedApiKey: false,
+          connected: true,
+          detail: "Logged in using ChatGPT",
+          models: [
+            { id: "gpt-5.5", label: "GPT-5.5", description: "Codex" },
+            { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", description: "Codex" },
+          ],
+          defaultModel: "gpt-5.5",
+        },
+        {
+          id: "openrouter" as const,
+          label: "OpenRouter",
+          binaryReady: true,
+          accountConnected: false,
+          apiKeyConfigured: openRouterConfigured,
+          inheritedApiKey: false,
+          connected: openRouterConfigured,
+          detail: openRouterConfigured ? "API key ready" : "API key required",
+          models: [
+            { id: "openai/gpt-5.5", label: "OpenAI: GPT-5.5", description: "400K context" },
+            { id: "google/gemini-3-pro", label: "Google: Gemini 3 Pro", description: "Tools" },
+          ],
+          defaultModel: "openai/gpt-5.5",
+        },
+      ];
+    },
+    async loginAgentProvider(provider) {
+      if (provider === "claude") claudeAuth = { ...claudeAuth, subscriptionLoggedIn: true };
+      return this.getAgentProviders();
+    },
+    async setAgentApiKey(provider) {
+      if (provider === "claude") claudeAuth = { ...claudeAuth, apiKeyConfigured: true };
+      if (provider === "openrouter") openRouterConfigured = true;
+      return this.getAgentProviders();
+    },
+    async clearAgentApiKey(provider) {
+      if (provider === "claude") claudeAuth = { ...claudeAuth, apiKeyConfigured: false };
+      if (provider === "openrouter") openRouterConfigured = false;
+      return this.getAgentProviders();
+    },
+    async sendAgentMessage(request: AgentChatRequest) {
+      const emitAgent = (event: AgentChatEnvelope["event"]): void => {
+        const envelope: AgentChatEnvelope = {
+          rootPath: MOCK_ROOT,
+          chatId: request.chatId,
+          provider: request.provider,
+          event,
+        };
+        for (const callback of agentCallbacks) callback(envelope);
+      };
+      const sessionId = "0199a213-81c0-7800-8aa1-bbab2a035a53";
+      emitAgent({ type: "session", sessionId, tools: ["Read", "Bash"] });
+      emitAgent({ type: "text-delta", text: "I’ll inspect the active Ralphy project." });
+      emitAgent({ type: "tool-start", id: "mock-tool", name: "Read", summary: "BRIEF.md" });
+      emitAgent({ type: "tool-result", id: "mock-tool", ok: true });
+      emitAgent({ type: "text-delta", text: " The latest assets are ready for review." });
+      emitAgent({
+        type: "result",
+        ok: true,
+        cancelled: false,
+        costUsd: 0,
+        durationMs: 250,
+        sessionId,
+      });
+    },
+    async stopAgent() {},
+    onAgentEvent(callback) {
+      agentCallbacks.add(callback);
+      return () => agentCallbacks.delete(callback);
+    },
+    onToggleRightPanel() {
+      return () => {};
     },
   };
 }

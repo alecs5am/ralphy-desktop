@@ -2,20 +2,17 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {
   ChevronLeft,
   ChevronRight,
-  Clipboard,
-  ExternalLink,
-  FolderSearch,
   X,
 } from "lucide-react";
 import { motion } from "motion/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import type {
+  AnnotationInput,
   MediaAnnotation,
   MediaItem,
   ProjectSummary,
 } from "../lib/ipc";
-import { bridge } from "../lib/ipc";
-import { formatAgentFeedback } from "../lib/agent-feedback";
+import { Inspector } from "../components/Inspector";
 import { AssetContent } from "../components/media/AssetContent";
 
 interface AssetViewerProps {
@@ -27,6 +24,8 @@ interface AssetViewerProps {
   onBack(): void;
   onPrevious(): void;
   onNext(): void;
+  onChange(annotation: AnnotationInput): void;
+  onTrash(): void;
 }
 
 export function AssetViewer({
@@ -38,8 +37,9 @@ export function AssetViewer({
   onBack,
   onPrevious,
   onNext,
+  onChange,
+  onTrash,
 }: AssetViewerProps) {
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const surfaceRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -59,16 +59,6 @@ export function AssetViewer({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [canNext, canPrevious, onNext, onPrevious]);
-
-  const copy = async () => {
-    try {
-      await bridge.copyText(formatAgentFeedback(project, [item], annotation ? { [item.id]: annotation } : {}));
-      setCopyState("copied");
-    } catch {
-      setCopyState("failed");
-    }
-    window.setTimeout(() => setCopyState("idle"), 1600);
-  };
 
   return (
     <Dialog.Root
@@ -115,20 +105,6 @@ export function AssetViewer({
               <div className="viewer-actions">
                 <button type="button" disabled={!canPrevious} title="Previous" aria-label="Previous" onClick={onPrevious}><ChevronLeft size={15} /></button>
                 <button type="button" disabled={!canNext} title="Next" aria-label="Next" onClick={onNext}><ChevronRight size={15} /></button>
-                <button
-                  className={copyState === "failed" ? "is-error" : ""}
-                  type="button"
-                  onClick={copy}
-                >
-                  <Clipboard size={13} />
-                  {copyState === "copied"
-                    ? "Copied"
-                    : copyState === "failed"
-                      ? "Copy failed"
-                      : "Copy for Agent"}
-                </button>
-                <button type="button" title="Reveal in Finder" aria-label="Reveal in Finder" onClick={() => bridge.showInFinder(item.absolutePath)}><FolderSearch size={14} /></button>
-                <button type="button" title="Open externally" aria-label="Open externally" onClick={() => bridge.openExternal(item.absolutePath)}><ExternalLink size={14} /></button>
                 <Dialog.Close asChild>
                   <button type="button" title="Close preview" aria-label="Close preview">
                     <X size={15} />
@@ -136,16 +112,28 @@ export function AssetViewer({
                 </Dialog.Close>
               </div>
             </div>
-            <div className={`asset-modal-stage asset-modal-kind-${item.kind}`}>
-              <motion.div
-                className="asset-modal-content"
-                key={item.id}
-                initial={{ opacity: 0, scale: 0.995 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ duration: 0.12 }}
-              >
-                <AssetContent item={item} />
-              </motion.div>
+            <div className="asset-modal-body">
+              <div className={`asset-modal-stage asset-modal-kind-${item.kind}`}>
+                <motion.div
+                  className="asset-modal-content"
+                  key={item.id}
+                  initial={{ opacity: 0, scale: 0.995 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ duration: 0.12 }}
+                >
+                  <AssetContent item={item} />
+                </motion.div>
+              </div>
+              <div className="asset-modal-inspector">
+                <Inspector
+                  item={item}
+                  project={project}
+                  annotation={annotation}
+                  previewEnabled={false}
+                  onChange={onChange}
+                  onTrash={onTrash}
+                />
+              </div>
             </div>
           </motion.section>
         </Dialog.Content>

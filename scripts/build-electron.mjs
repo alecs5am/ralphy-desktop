@@ -14,6 +14,6 @@ await build({
   target: "node20",
   outdir: "dist-electron",
   outExtension: { ".js": ".cjs" },
-  external: ["electron"],
+  external: ["electron", "node-pty"],
   logLevel: "info",
 });

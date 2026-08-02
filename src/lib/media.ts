@@ -212,13 +212,14 @@ export function assetGridGeometry(
   };
 }
 
-type PreviewKind = "image" | "video";
+type PreviewKind = "image" | "video" | "audio";
 
 export function createPreviewScheduler(limits: Record<PreviewKind, number>) {
-  const active: Record<PreviewKind, number> = { image: 0, video: 0 };
+  const active: Record<PreviewKind, number> = { image: 0, video: 0, audio: 0 };
   const waiting: Record<PreviewKind, Array<(release: () => void) => void>> = {
     image: [],
     video: [],
+    audio: [],
   };
 
   const releaseFor = (kind: PreviewKind): (() => void) => {
@@ -243,4 +244,8 @@ export function createPreviewScheduler(limits: Record<PreviewKind, number>) {
   };
 }
 
-export const previewScheduler = createPreviewScheduler({ image: 4, video: 2 });
+export const previewScheduler = createPreviewScheduler({
+  image: 4,
+  video: 2,
+  audio: 1,
+});

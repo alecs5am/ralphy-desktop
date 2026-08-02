@@ -297,6 +297,12 @@ describe("workbench ordering and preferences", () => {
     expect(preferences.sidebarWidth).toBe(420);
     expect(preferences.rightPanelWidth).toBe(280);
     expect(preferences.bottomPanelHeight).toBe(160);
+
+    const compact = readWorkbenchPreferences({
+      getItem: () => JSON.stringify({ sidebarWidth: 1 }),
+      setItem: () => undefined,
+    });
+    expect(compact.sidebarWidth).toBe(288);
   });
 
   test("round-trips app-local navigation, panels, view, and pins", () => {

@@ -186,6 +186,92 @@ export interface TrashResult {
   failed: Array<{ path: string; error: string }>;
 }
 
+export interface TerminalDimensions {
+  cols: number;
+  rows: number;
+}
+
+export interface TerminalSession {
+  id: string;
+  cwd: string;
+  shell: string;
+  pid: number;
+  status: "running" | "exited";
+  exitCode?: number;
+  signal?: number;
+}
+
+export type TerminalEvent =
+  | { type: "data"; sessionId: string; data: string }
+  | { type: "exit"; sessionId: string; exitCode: number; signal: number };
+
+export type AgentProvider = "claude" | "codex" | "openrouter";
+export type AgentPermissionMode = "auto" | "plan" | "full";
+export type ClaudeAuthMethod = "subscription" | "api-key";
+export type ClaudePermissionMode = AgentPermissionMode;
+
+export interface ClaudeAuthState {
+  binaryReady: boolean;
+  subscriptionLoggedIn: boolean;
+  subscriptionAuthMethod: string | null;
+  apiKeyConfigured: boolean;
+  inheritedApiKey: boolean;
+}
+
+export type AgentChatEvent =
+  | { type: "session"; sessionId: string; tools: string[] }
+  | { type: "text-delta"; text: string }
+  | { type: "tool-start"; id: string; name: string; summary: string }
+  | { type: "tool-result"; id: string; ok: boolean }
+  | {
+    type: "result";
+    ok: boolean;
+    cancelled: boolean;
+    costUsd: number;
+    durationMs: number;
+    sessionId: string | null;
+  }
+  | { type: "error"; code: string; message: string };
+
+export type ClaudeChatEvent = AgentChatEvent;
+
+export interface AgentChatRequest {
+  chatId: string;
+  provider: AgentProvider;
+  model: string;
+  prompt: string;
+  project?: ProjectReference | null;
+  claudeAuthMethod: ClaudeAuthMethod;
+  permissionMode: AgentPermissionMode;
+  resumeSessionId?: string | null;
+}
+
+export interface AgentModelOption {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface AgentProviderStatus {
+  id: AgentProvider;
+  label: string;
+  binaryReady: boolean;
+  accountConnected: boolean;
+  apiKeyConfigured: boolean;
+  inheritedApiKey: boolean;
+  connected: boolean;
+  detail: string;
+  models: AgentModelOption[];
+  defaultModel: string;
+}
+
+export interface AgentChatEnvelope {
+  rootPath: string;
+  chatId: string;
+  provider: AgentProvider;
+  event: AgentChatEvent;
+}
+
 export type MediaEvent =
   | { type: "catalog-progress"; progress: CatalogProgress }
   | { type: "catalog-result"; result: CatalogResult }
@@ -209,10 +295,31 @@ export interface MediaWorkbenchBridge {
   trashItems(paths: string[]): Promise<TrashResult>;
   showInFinder(path: string): Promise<void>;
   openExternal(path: string): Promise<string>;
+  startFileDrag(path: string): void;
   copyText(text: string): Promise<void>;
   readText(path: string, maxBytes?: number): Promise<TextReadResult>;
   getMediaUrl(path: string): Promise<MediaPreviewSource>;
+  createTerminal(dimensions: TerminalDimensions): Promise<TerminalSession>;
+  writeTerminal(sessionId: string, data: string): void;
+  resizeTerminal(sessionId: string, dimensions: TerminalDimensions): void;
+  killTerminal(sessionId: string): Promise<void>;
+  onTerminalEvent(callback: (event: TerminalEvent) => void): () => void;
+  getAgentProviders(): Promise<AgentProviderStatus[]>;
+  loginAgentProvider(provider: "claude" | "codex"): Promise<AgentProviderStatus[]>;
+  setAgentApiKey(
+    provider: "claude" | "openrouter",
+    apiKey: string,
+  ): Promise<AgentProviderStatus[]>;
+  clearAgentApiKey(provider: "claude" | "openrouter"): Promise<AgentProviderStatus[]>;
+  sendAgentMessage(request: AgentChatRequest): Promise<void>;
+  stopAgent(): Promise<void>;
+  onAgentEvent(callback: (event: AgentChatEnvelope) => void): () => void;
+  onToggleRightPanel(callback: () => void): () => void;
 }
+
+export const APP_CHANNELS = {
+  toggleRightPanel: "app:toggle-right-panel",
+} as const;
 
 export const MEDIA_CHANNELS = {
   chooseLibrary: "media:library:choose",
@@ -226,9 +333,28 @@ export const MEDIA_CHANNELS = {
   trashItems: "media:files:trash",
   showInFinder: "media:files:finder",
   openExternal: "media:files:open",
+  startFileDrag: "media:files:drag",
   copyText: "media:clipboard:write",
   readText: "media:text:read",
   getMediaUrl: "media:url",
+} as const;
+
+export const TERMINAL_CHANNELS = {
+  create: "terminal:create",
+  write: "terminal:write",
+  resize: "terminal:resize",
+  kill: "terminal:kill",
+  event: "terminal:event",
+} as const;
+
+export const AGENT_CHANNELS = {
+  providers: "agent:providers",
+  login: "agent:login",
+  setApiKey: "agent:api-key:set",
+  clearApiKey: "agent:api-key:clear",
+  send: "agent:send",
+  stop: "agent:stop",
+  event: "agent:event",
 } as const;
 
 export type WorkerRequest =

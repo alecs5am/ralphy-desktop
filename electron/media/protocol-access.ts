@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { lstatSync } from "node:fs";
 import { lstat } from "node:fs/promises";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { resolveContainedPath, validateLibraryRoot } from "./catalog";
 import type {
   MediaKind,
@@ -10,6 +12,13 @@ import type {
 const PREVIEWABLE_KINDS = new Set<MediaKind>(["image", "video", "audio", "pdf"]);
 const DEFAULT_MAX_ASSET_BYTES = 8 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_TOKENS = 4096;
+
+function selectedFilePath(value: unknown): string {
+  if (typeof value !== "string" || !value || value.length > 4096) {
+    throw new Error("Invalid selected project file path");
+  }
+  return value;
+}
 
 export interface MediaByteRange {
   start: number;
@@ -122,26 +131,56 @@ export class MediaProtocolAccess {
     requestedPath: unknown,
     allowedKinds?: readonly MediaKind[],
   ): Promise<string> {
-    if (
-      typeof requestedPath !== "string"
-      || !requestedPath
-      || requestedPath.length > 4096
-    ) {
-      throw new Error("Invalid selected project file path");
-    }
+    const requested = selectedFilePath(requestedPath);
     const root = await validateLibraryRoot(rootPath);
     if (root !== this.#rootPath) throw new Error("Media scan is no longer active");
-    const path = await resolveContainedPath(rootPath, requestedPath).catch(() => {
+    const path = await resolveContainedPath(rootPath, requested).catch(() => {
       throw new Error("Path is not selected project media");
     });
+    this.#assertAllowed(path, allowedKinds);
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error("Media path is not a regular file");
+    return path;
+  }
+
+  resolveFileForDrag(rootPath: string, requestedPath: unknown): string {
+    const path = selectedFilePath(requestedPath);
+    if (rootPath !== this.#rootPath) throw new Error("Media scan is no longer active");
+    this.#assertAllowed(path);
+
+    const relativePath = relative(rootPath, path);
+    if (
+      !relativePath
+      || relativePath === ".."
+      || relativePath.startsWith(`..${sep}`)
+      || isAbsolute(relativePath)
+    ) {
+      throw new Error("Path is not selected project media");
+    }
+
+    let current = rootPath;
+    let leaf: ReturnType<typeof lstatSync> | null = null;
+    for (const segment of relativePath.split(sep)) {
+      current = join(current, segment);
+      try {
+        leaf = lstatSync(current);
+      } catch {
+        throw new Error("Media path is not a regular file");
+      }
+      if (leaf.isSymbolicLink()) {
+        throw new Error("Media path contains a symbolic link");
+      }
+    }
+    if (!leaf?.isFile()) throw new Error("Media path is not a regular file");
+    return path;
+  }
+
+  #assertAllowed(path: string, allowedKinds?: readonly MediaKind[]): void {
     const kind = this.#allowedPaths.get(path);
     if (!kind) throw new Error("Path is not selected project media");
     if (allowedKinds && !allowedKinds.includes(kind)) {
       throw new Error("Unsupported selected project file type");
     }
-    const info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink()) throw new Error("Media path is not a regular file");
-    return path;
   }
 
   async #validatePreview(path: string): Promise<number> {

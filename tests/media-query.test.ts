@@ -174,7 +174,7 @@ describe("grid geometry", () => {
   });
 
   test("bounds concurrent preview decodes by media kind", async () => {
-    const scheduler = createPreviewScheduler({ image: 2, video: 1 });
+    const scheduler = createPreviewScheduler({ image: 2, video: 1, audio: 1 });
     const releaseFirst = await scheduler.acquire("image");
     const releaseSecond = await scheduler.acquire("image");
     let thirdStarted = false;
@@ -191,5 +191,16 @@ describe("grid geometry", () => {
 
     releaseSecond();
     releaseThird();
+
+    const releaseAudio = await scheduler.acquire("audio");
+    let nextAudioStarted = false;
+    const nextAudio = scheduler.acquire("audio").then((release) => {
+      nextAudioStarted = true;
+      return release;
+    });
+    await Promise.resolve();
+    expect(nextAudioStarted).toBe(false);
+    releaseAudio();
+    (await nextAudio)();
   });
 });

@@ -28,7 +28,11 @@ const exitCode = await new Promise((resolveExit) => child.once("exit", resolveEx
 clearTimeout(timeout);
 await rm(userData, { recursive: true, force: true });
 
-if (exitCode !== 0 || !output.includes("RALPHY_SMOKE_READY")) {
+if (
+  exitCode !== 0
+  || !output.includes("RALPHY_SMOKE_READY")
+  || !output.includes("RALPHY_TERMINAL_BRIDGE_READY")
+) {
   console.error(output);
   process.exit(1);
 }

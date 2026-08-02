@@ -25,7 +25,7 @@ interface InspectorProps {
   previewEnabled?: boolean;
   onChange(annotation: AnnotationInput): void;
   onTrash(): void;
-  onOpen(): void;
+  onOpen?(): void;
 }
 
 function Property({ label, children }: { label: string; children: React.ReactNode }) {
@@ -65,7 +65,7 @@ export function Inspector({
       exit={{ x: 24, opacity: 0 }}
       transition={{ duration: 0.18, ease: [0.2, 0, 0.2, 1] }}
     >
-      {previewEnabled ? <InspectorPreview item={item} onOpen={onOpen} /> : null}
+      {previewEnabled && onOpen ? <InspectorPreview item={item} onOpen={onOpen} /> : null}
 
       <div className="inspector-file">
         <span className="inspector-file-icon"><File size={16} /></span>

@@ -148,7 +148,7 @@ export function MainHeader({
                 {crumb.label}
               </button>
             ) : (
-              <span>{crumb.label}</span>
+              <span aria-current="page">{crumb.label}</span>
             )}
           </span>
         ))}
@@ -178,7 +178,7 @@ export function MainHeader({
         <button
           className={`icon-button${rightPanelVisible ? " is-active" : ""}`}
           type="button"
-          title="Toggle right panel (⌘⌥B)"
+          title="Toggle right panel (⌘R)"
           aria-label="Toggle right panel"
           aria-pressed={rightPanelVisible}
           onClick={onToggleRightPanel}

@@ -56,9 +56,9 @@ export type WorkbenchAction =
 const PREFERENCES_KEY = "ralphy-media-workbench-v1";
 
 export const PANEL_SIZE_LIMITS = {
-  sidebar: { min: 220, max: 420, default: 288 },
+  sidebar: { min: 288, max: 420, default: 288 },
   right: { min: 280, max: 520, default: 336 },
-  bottom: { min: 160, max: 480, default: 220 },
+  bottom: { min: 160, max: 720, default: 220 },
 } as const;
 
 export function createInitialWorkbenchState(

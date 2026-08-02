@@ -11,10 +11,11 @@ import {
 } from "react";
 import { AnimatePresence, LayoutGroup, MotionConfig, motion } from "motion/react";
 import { ContextSidebar } from "./components/ContextSidebar";
-import { Inspector } from "./components/Inspector";
 import { MainHeader } from "./components/Titlebar";
-import { BottomPanel, RightPanelSummary } from "./components/UtilityPanels";
+import { AgentChatPanel, BottomPanel } from "./components/UtilityPanels";
+import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ResizeHandle } from "./components/ui/ResizeHandle";
+import { useAgentChat } from "./chat/useAgentChat";
 import {
   bridge,
   type MediaAnnotation,
@@ -44,6 +45,13 @@ const loadProjectScreen = () =>
     default: ProjectScreen,
   }));
 const ProjectScreen = lazy(loadProjectScreen);
+const loadSettingsScreen = () =>
+  import("./screens/SettingsScreen").then(({ SettingsScreen }) => ({
+    default: SettingsScreen,
+  }));
+const SettingsScreen = lazy(loadSettingsScreen);
+const WELCOME_MINIMUM_MS = 1_200;
+const WELCOME_EXIT_MS = 300;
 
 export function App() {
   const initialPreferences = useRef(readWorkbenchPreferences(localStorage));
@@ -53,6 +61,8 @@ export function App() {
     createInitialWorkbenchState,
   );
   const [restoring, setRestoring] = useState(true);
+  const [welcomeVisible, setWelcomeVisible] = useState(true);
+  const [welcomeExiting, setWelcomeExiting] = useState(false);
   const [projectLoading, setProjectLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sidebarVisible, setSidebarVisible] = useState(
@@ -64,6 +74,7 @@ export function App() {
   const [bottomPanelVisible, setBottomPanelVisible] = useState(
     initialPreferences.current.bottomPanelVisible,
   );
+  const [settingsVisible, setSettingsVisible] = useState(false);
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(
     initialPreferences.current.workspaceView,
   );
@@ -84,12 +95,11 @@ export function App() {
   const [sidebarSearchRequest, setSidebarSearchRequest] = useState(0);
   const [includeIntermediate, setIncludeIntermediate] = useState(false);
   const [annotations, setAnnotations] = useState<Record<string, MediaAnnotation>>({});
-  const [selectedAsset, setSelectedAsset] = useState<MediaItem | null>(null);
-  const [selectedAssetItems, setSelectedAssetItems] = useState<MediaItem[]>([]);
   const [viewer, setViewer] = useState<{ itemId: string; items: MediaItem[] } | null>(null);
   const projectRequest = useRef(0);
   const annotationRequests = useRef(new Map<string, number>());
   const restorationStarted = useRef(false);
+  const welcomeStartedAt = useRef(Date.now());
 
   const catalog = state.catalog;
   const workspaces = catalog?.workspaces ?? [];
@@ -107,6 +117,11 @@ export function App() {
         project.workspaceId === workspaceId && project.projectId === projectId,
     ) ?? null;
   }, [projects, state.route]);
+  const agentChat = useAgentChat({
+    rootPath: catalog?.rootPath ?? null,
+    project: selectedProject,
+    enabled: rightPanelVisible,
+  });
   const showRightPanel = catalog !== null && rightPanelVisible;
   const sidebarMax = Math.max(
     PANEL_SIZE_LIMITS.sidebar.min,
@@ -124,7 +139,7 @@ export function App() {
   );
   const bottomPanelMax = Math.max(
     PANEL_SIZE_LIMITS.bottom.min,
-    Math.min(PANEL_SIZE_LIMITS.bottom.max, viewport.height - 328),
+    Math.min(PANEL_SIZE_LIMITS.bottom.max, Math.floor(viewport.height * 0.5)),
   );
 
   useEffect(() => {
@@ -190,6 +205,32 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (restoring || !welcomeVisible) return;
+    let exitTimer = 0;
+    const remaining = Math.max(
+      0,
+      WELCOME_MINIMUM_MS - (Date.now() - welcomeStartedAt.current),
+    );
+    const revealTimer = window.setTimeout(() => {
+      setWelcomeExiting(true);
+      exitTimer = window.setTimeout(
+        () => setWelcomeVisible(false),
+        WELCOME_EXIT_MS,
+      );
+    }, remaining);
+    return () => {
+      window.clearTimeout(revealTimer);
+      window.clearTimeout(exitTimer);
+    };
+  }, [restoring, welcomeVisible]);
+
+  useEffect(
+    () => bridge.onToggleRightPanel(() =>
+      setRightPanelVisible((visible) => !visible)),
+    [],
+  );
+
+  useEffect(() => {
     if (state.route.kind !== "project") {
       projectRequest.current += 1;
       setProjectLoading(false);
@@ -220,8 +261,6 @@ export function App() {
   }, [includeIntermediate, state.route]);
 
   useEffect(() => {
-    setSelectedAsset(null);
-    setSelectedAssetItems([]);
     setViewer(null);
   }, [
     state.route.kind === "project" ? state.route.projectId : null,
@@ -302,8 +341,6 @@ export function App() {
         });
         const store = await bridge.loadAnnotations();
         setAnnotations(store.items);
-        setSelectedAsset(null);
-        setSelectedAssetItems([]);
         setIncludeIntermediate(false);
       }
     } catch (cause) {
@@ -322,8 +359,6 @@ export function App() {
       const key = event.key.toLocaleLowerCase();
       const command =
         event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey;
-      const commandOption =
-        event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey;
       if (command && event.key === "[") {
         event.preventDefault();
         navigateBack();
@@ -333,15 +368,18 @@ export function App() {
       } else if (command && key === "f") {
         event.preventDefault();
         setSidebarSearchRequest((request) => request + 1);
-      } else if (commandOption && key === "b") {
-        event.preventDefault();
-        setRightPanelVisible((visible) => !visible);
       } else if (command && key === "j") {
         event.preventDefault();
         setBottomPanelVisible((visible) => !visible);
       } else if (command && key === "b") {
         event.preventDefault();
         setSidebarVisible((visible) => !visible);
+      } else if (command && event.key === ",") {
+        event.preventDefault();
+        setSettingsVisible(true);
+      } else if (settingsVisible && event.key === "Escape") {
+        event.preventDefault();
+        setSettingsVisible(false);
       }
     };
     const onMouseUp = (event: MouseEvent) => {
@@ -354,7 +392,7 @@ export function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("mouseup", onMouseUp);
     };
-  }, [navigateBack]);
+  }, [navigateBack, settingsVisible]);
 
   const openProject = (project: ProjectSummary) => {
     dispatch({
@@ -403,25 +441,21 @@ export function App() {
     }
   };
 
-  const trashSelected = async () => {
-    if (!selectedAsset) return;
-    const result = await bridge.trashItems([selectedAsset.absolutePath]);
-    if (result.failed.length > 0) {
-      setError(result.failed[0].error);
-      return;
+  const trashItem = async (item: MediaItem) => {
+    try {
+      const result = await bridge.trashItems([item.absolutePath]);
+      if (result.failed.length > 0) {
+        setError(result.failed[0].error);
+        return;
+      }
+      setViewer((current) => current?.itemId === item.id ? null : current);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
     }
-    setViewer(null);
-    setSelectedAsset(null);
-    setSelectedAssetItems([]);
   };
 
-  if (restoring) {
-    return (
-      <div className="boot-screen">
-        <span className="brand-mark">R</span>
-        <span>Opening library…</span>
-      </div>
-    );
+  if (welcomeVisible) {
+    return <WelcomeScreen exiting={welcomeExiting} restoring={restoring} />;
   }
 
   let content = (
@@ -463,15 +497,11 @@ export function App() {
           loading={projectLoading}
           includeIntermediate={includeIntermediate}
           onIncludeIntermediateChange={setIncludeIntermediate}
-          onSelectAsset={(item, visibleItems) => {
-            setSelectedAsset(item);
-            setSelectedAssetItems(item ? visibleItems : []);
-          }}
           onOpenAsset={(item, visibleItems) => {
-            setSelectedAsset(item);
-            setSelectedAssetItems(visibleItems);
             setViewer({ itemId: item.id, items: visibleItems });
           }}
+          onChangeAsset={(item, input) => void updateAnnotation(item, input)}
+          onTrashAsset={(item) => void trashItem(item)}
         />
       </Suspense>
     );
@@ -483,7 +513,7 @@ export function App() {
   return (
     <MotionConfig reducedMotion="user">
       <LayoutGroup id="asset-workbench">
-        <div
+        <motion.div
           className={[
             "workbench",
             !sidebarVisible ? " sidebar-collapsed" : "",
@@ -496,6 +526,9 @@ export function App() {
             "--sidebar-w": `${sidebarWidth}px`,
             "--inspector-w": `${rightPanelWidth}px`,
           } as CSSProperties}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.24 }}
         >
           <AnimatePresence initial={false}>
             {catalog && sidebarVisible && (
@@ -512,7 +545,7 @@ export function App() {
                 onBack={navigateBack}
                 onForward={() => dispatch({ type: "forward" })}
                 onToggleSidebar={() => setSidebarVisible(false)}
-                onChooseLibrary={chooseLibrary}
+                onOpenSettings={() => setSettingsVisible(true)}
                 onOpenWorkspace={(workspaceId) =>
                   dispatch({ type: "open-workspace", workspaceId })
                 }
@@ -558,28 +591,25 @@ export function App() {
               }
             />
             <div className="main-content-stage">{content}</div>
-            <AnimatePresence initial={false}>
-              {bottomPanelVisible && (
-                <>
-                  <ResizeHandle
-                    ariaLabel="Resize bottom panel"
-                    orientation="horizontal"
-                    value={bottomPanelHeight}
-                    min={PANEL_SIZE_LIMITS.bottom.min}
-                    max={bottomPanelMax}
-                    defaultValue={PANEL_SIZE_LIMITS.bottom.default}
-                    direction={-1}
-                    className="resize-bottom"
-                    onChange={setBottomPanelHeight}
-                    onActiveChange={setIsResizing}
-                  />
-                  <BottomPanel
-                    height={bottomPanelHeight}
-                    onClose={() => setBottomPanelVisible(false)}
-                  />
-                </>
-              )}
-            </AnimatePresence>
+            {bottomPanelVisible && (
+              <ResizeHandle
+                ariaLabel="Resize bottom panel"
+                orientation="horizontal"
+                value={bottomPanelHeight}
+                min={PANEL_SIZE_LIMITS.bottom.min}
+                max={bottomPanelMax}
+                defaultValue={PANEL_SIZE_LIMITS.bottom.default}
+                direction={-1}
+                className="resize-bottom"
+                onChange={setBottomPanelHeight}
+                onActiveChange={setIsResizing}
+              />
+            )}
+            <BottomPanel
+              height={bottomPanelHeight}
+              visible={bottomPanelVisible}
+              rootPath={catalog?.rootPath ?? null}
+            />
           </motion.section>
           {showRightPanel && (
             <ResizeHandle
@@ -596,25 +626,10 @@ export function App() {
             />
           )}
           <AnimatePresence initial={false}>
-            {showRightPanel && selectedProject && selectedAsset ? (
-              <Inspector
-                key="asset-inspector"
-                item={selectedAsset}
-                project={selectedProject}
-                annotation={annotations[selectedAsset.id]}
-                previewEnabled={!viewerItem}
-                onChange={(input) => void updateAnnotation(selectedAsset, input)}
-                onTrash={() => void trashSelected()}
-                onOpen={() => setViewer({
-                  itemId: selectedAsset.id,
-                  items: selectedAssetItems.some((item) => item.id === selectedAsset.id)
-                    ? selectedAssetItems
-                    : [selectedAsset],
-                })}
-              />
-            ) : showRightPanel ? (
-              <RightPanelSummary
-                key="right-summary"
+            {showRightPanel ? (
+              <AgentChatPanel
+                key="agent-chat"
+                chat={agentChat}
                 workspace={selectedWorkspace}
                 project={selectedProject}
                 onClose={() => setRightPanelVisible(false)}
@@ -635,16 +650,16 @@ export function App() {
                   const item = adjacentMediaItem(viewerItems, viewerItem.id, -1);
                   if (item) {
                     setViewer({ itemId: item.id, items: viewerItems });
-                    setSelectedAsset(item);
                   }
                 }}
                 onNext={() => {
                   const item = adjacentMediaItem(viewerItems, viewerItem.id, 1);
                   if (item) {
                     setViewer({ itemId: item.id, items: viewerItems });
-                    setSelectedAsset(item);
                   }
                 }}
+                onChange={(input) => void updateAnnotation(viewerItem, input)}
+                onTrash={() => void trashItem(viewerItem)}
               />
             )}
           </Suspense>
@@ -654,7 +669,18 @@ export function App() {
               <button type="button" onClick={() => setError(null)}>Dismiss</button>
             </div>
           )}
-        </div>
+          <AnimatePresence>
+            {settingsVisible && (
+              <Suspense fallback={null}>
+                <SettingsScreen
+                  rootPath={catalog?.rootPath ?? null}
+                  onBack={() => setSettingsVisible(false)}
+                  onChooseLibrary={() => void chooseLibrary()}
+                />
+              </Suspense>
+            )}
+          </AnimatePresence>
+        </motion.div>
       </LayoutGroup>
     </MotionConfig>
   );

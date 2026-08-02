@@ -11,6 +11,7 @@ import { ProjectControls } from "../components/ProjectControls";
 import { ProjectHeader } from "../components/ProjectHeader";
 import { VirtualAssetGrid } from "../components/VirtualAssetGrid";
 import type {
+  AnnotationInput,
   MediaAnnotation,
   MediaItem,
   MediaKind,
@@ -35,7 +36,8 @@ interface ProjectScreenProps {
   includeIntermediate: boolean;
   onIncludeIntermediateChange(value: boolean): void;
   onOpenAsset(item: MediaItem, visibleItems: MediaItem[]): void;
-  onSelectAsset(item: MediaItem | null, visibleItems: MediaItem[]): void;
+  onChangeAsset(item: MediaItem, annotation: AnnotationInput): void;
+  onTrashAsset(item: MediaItem): void;
 }
 
 const overviewSections: Array<{
@@ -59,7 +61,8 @@ export function ProjectScreen({
   includeIntermediate,
   onIncludeIntermediateChange,
   onOpenAsset,
-  onSelectAsset,
+  onChangeAsset,
+  onTrashAsset,
 }: ProjectScreenProps) {
   const [query, setQuery] = useState<MediaQueryOptions>({
     ...defaultMediaQuery,
@@ -107,12 +110,10 @@ export function ProjectScreen({
     }
     setQuery(next);
     setSelectedId(null);
-    onSelectAsset(null, []);
   };
 
   const selectAsset = (item: MediaItem) => {
     setSelectedId(item.id);
-    onSelectAsset(item, visibleItems);
   };
 
   const copyForAgent = async () => {
@@ -215,6 +216,8 @@ export function ProjectScreen({
           selectedId={selectedId}
           onSelect={selectAsset}
           onOpen={(item) => onOpenAsset(item, visibleItems)}
+          onChange={onChangeAsset}
+          onTrash={onTrashAsset}
         />
       )}
     </main>

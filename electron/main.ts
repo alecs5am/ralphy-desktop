@@ -5,13 +5,43 @@ import {
   dialog,
   ipcMain,
   net,
+  nativeImage,
   protocol,
+  safeStorage,
+  screen,
   shell,
 } from "electron";
+import { readFileSync, statSync } from "node:fs";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import { Worker } from "node:worker_threads";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import * as nodePty from "node-pty";
+import {
+  ClaudeCredentialStore,
+  EncryptedCredentialStore,
+  validateAnthropicApiKey,
+  validateOpenRouterApiKey,
+} from "./claude/credentials";
+import { parseAgentChatRequest } from "./agent/request";
+import {
+  CodexSession,
+  loginCodex,
+  readCodexAuthStatus,
+  resolveCodexBinary,
+} from "./agent/codex-session";
+import {
+  CLAUDE_MODELS,
+  fetchOpenRouterModels,
+  readCodexModels,
+} from "./agent/models";
+import {
+  ClaudeSession,
+  claudeSubscriptionEnvironment,
+  loginClaudeSubscription,
+  readClaudeAuthStatus,
+  resolveClaudeBinary,
+} from "./claude/session";
 import { loadAnnotations, updateAnnotations } from "./media/annotations";
 import {
   readBoundedText,
@@ -19,9 +49,16 @@ import {
   validateLibraryRoot,
 } from "./media/catalog";
 import {
+  AGENT_CHANNELS,
+  APP_CHANNELS,
   MEDIA_CHANNELS,
   MAX_WAVEFORM_DECODE_BYTES,
+  TERMINAL_CHANNELS,
   type CatalogResult,
+  type AgentChatEnvelope,
+  type AgentProvider,
+  type AgentProviderStatus,
+  type ClaudeAuthState,
   type LibraryOpenResult,
   type MediaEvent,
   type MediaPreviewSource,
@@ -29,6 +66,7 @@ import {
   type ProjectScanQuery,
   type ProjectScanRequest,
   type ProjectScanResult,
+  type TerminalDimensions,
   type WorkerRequest,
   type WorkerResponse,
 } from "./media/types";
@@ -52,13 +90,44 @@ import {
   StaleMediaSessionError,
   stopMediaRuntime,
 } from "./media/session";
+import { TerminalManager } from "./terminal/manager";
+import {
+  fitWindowBounds,
+  parseWindowBounds,
+  type WindowBounds,
+} from "./window-state";
 
 const RENDERER = join(__dirname, "..", "dist", "index.html");
 const WORKER_ENTRY = join(__dirname, "media", "worker.cjs");
 const SETTINGS_LIMIT_BYTES = 64 * 1024;
+const WINDOW_STATE_LIMIT_BYTES = 1024;
+const DEFAULT_WINDOW_SIZE = { width: 1200, height: 800 };
+const MINIMUM_WINDOW_SIZE = { width: 1100, height: 720 };
 const CLIPBOARD_LIMIT = 2 * 1024 * 1024;
 const MAX_TRASH_ITEMS = 1000;
 const SMOKE_TEST = process.argv.includes("--smoke-test");
+let cachedFileDragIcon: Electron.NativeImage | null = null;
+let claudeCredentialStore: ClaudeCredentialStore | null = null;
+let openRouterCredentialStore: EncryptedCredentialStore | null = null;
+let activeAgentSession: { stop(): void } | null = null;
+let agentTurnBusy = false;
+let cachedOpenRouterModels: { at: number; models: AgentProviderStatus["models"] } | null = null;
+
+function fileDragIcon(): Electron.NativeImage {
+  if (cachedFileDragIcon) return cachedFileDragIcon;
+  const candidates = [
+    join(process.resourcesPath, "RalphyMedia-drag.png"),
+    join(__dirname, "..", "assets", "app-icon-1024.png"),
+  ];
+  for (const path of candidates) {
+    const icon = nativeImage.createFromPath(path);
+    if (!icon.isEmpty()) {
+      cachedFileDragIcon = icon.resize({ width: 48, height: 48 });
+      return cachedFileDragIcon;
+    }
+  }
+  throw new Error("Native drag icon is unavailable");
+}
 
 protocol.registerSchemesAsPrivileged([{
   scheme: "ralphy-media",
@@ -164,6 +233,149 @@ let worker: MediaWorkerClient | null = null;
 const mediaState = new MediaSessionState();
 const watcher = new ActiveRootResource<LibraryWatcher>();
 const restoreLibrary = createSingleFlight<LibraryOpenResult | null>();
+const terminalManager = new TerminalManager({
+  spawn: (file, args, options) => nodePty.spawn(file, args, options),
+  emit: (event) => sendIfWindowAlive(win, TERMINAL_CHANNELS.event, event),
+});
+
+function credentialStore(): ClaudeCredentialStore {
+  if (!claudeCredentialStore) {
+    claudeCredentialStore = new ClaudeCredentialStore({
+      path: join(app.getPath("userData"), "claude-api-key.bin"),
+      cipher: safeStorage,
+    });
+  }
+  return claudeCredentialStore;
+}
+
+function openRouterStore(): EncryptedCredentialStore {
+  if (!openRouterCredentialStore) {
+    openRouterCredentialStore = new EncryptedCredentialStore({
+      path: join(app.getPath("userData"), "openrouter-api-key.bin"),
+      cipher: safeStorage,
+      validate: validateOpenRouterApiKey,
+    });
+  }
+  return openRouterCredentialStore;
+}
+
+function inheritedAnthropicApiKey(): string | null {
+  try {
+    return validateAnthropicApiKey(process.env.ANTHROPIC_API_KEY ?? "");
+  } catch {
+    return null;
+  }
+}
+
+function inheritedOpenRouterApiKey(): string | null {
+  try {
+    return validateOpenRouterApiKey(process.env.OPENROUTER_API_KEY ?? "");
+  } catch {
+    return null;
+  }
+}
+
+async function openRouterModels(apiKey?: string): Promise<AgentProviderStatus["models"]> {
+  if (cachedOpenRouterModels && Date.now() - cachedOpenRouterModels.at < 5 * 60_000) {
+    return cachedOpenRouterModels.models;
+  }
+  const models = await fetchOpenRouterModels(
+    (input, init) => net.fetch(
+      typeof input === "string" || input instanceof Request ? input : input.toString(),
+      init,
+    ),
+    apiKey,
+  ).catch(() => []);
+  if (models.length > 0) cachedOpenRouterModels = { at: Date.now(), models };
+  return models;
+}
+
+async function claudeAuthState(binary?: string | null): Promise<ClaudeAuthState> {
+  const resolvedBinary = binary === undefined ? await resolveClaudeBinary() : binary;
+  let subscriptionLoggedIn = false;
+  let subscriptionAuthMethod: string | null = null;
+  if (resolvedBinary) {
+    try {
+      const status = await readClaudeAuthStatus(
+        resolvedBinary,
+        claudeSubscriptionEnvironment(process.env),
+      );
+      subscriptionLoggedIn = status.loggedIn;
+      subscriptionAuthMethod = status.loggedIn ? status.authMethod : null;
+    } catch {
+      // A missing or expired Claude login is represented as disconnected state.
+    }
+  }
+  const inheritedApiKey = inheritedAnthropicApiKey() !== null;
+  return {
+    binaryReady: resolvedBinary !== null,
+    subscriptionLoggedIn,
+    subscriptionAuthMethod,
+    apiKeyConfigured: inheritedApiKey || await credentialStore().has(),
+    inheritedApiKey,
+  };
+}
+
+async function agentProviderStatuses(): Promise<AgentProviderStatus[]> {
+  const [claude, codexBinary] = await Promise.all([
+    claudeAuthState(),
+    resolveCodexBinary(),
+  ]);
+  const codexStatus = codexBinary
+    ? await readCodexAuthStatus(codexBinary).catch(() => null)
+    : null;
+  const codexModels = codexBinary
+    ? await readCodexModels(join(app.getPath("home"), ".codex", "models_cache.json"))
+    : [];
+  const inheritedOpenRouterKey = inheritedOpenRouterApiKey();
+  const storedOpenRouterKey = await openRouterStore().read();
+  const openRouterKey = storedOpenRouterKey ?? inheritedOpenRouterKey ?? undefined;
+  const routerModels = await openRouterModels(openRouterKey);
+
+  const claudeConnected = claude.subscriptionLoggedIn || claude.apiKeyConfigured;
+  const codexConnected = codexBinary !== null && codexStatus?.loggedIn === true;
+  const routerConnected = codexBinary !== null && Boolean(openRouterKey);
+  return [
+    {
+      id: "claude",
+      label: "Claude",
+      binaryReady: claude.binaryReady,
+      accountConnected: claude.subscriptionLoggedIn,
+      apiKeyConfigured: claude.apiKeyConfigured,
+      inheritedApiKey: claude.inheritedApiKey,
+      connected: claude.binaryReady && claudeConnected,
+      detail: claude.subscriptionLoggedIn
+        ? `Signed in with ${claude.subscriptionAuthMethod ?? "Claude"}`
+        : claude.apiKeyConfigured ? "Anthropic API key ready" : "Claude login required",
+      models: CLAUDE_MODELS,
+      defaultModel: "sonnet",
+    },
+    {
+      id: "codex",
+      label: "Codex",
+      binaryReady: codexBinary !== null,
+      accountConnected: codexStatus?.loggedIn === true,
+      apiKeyConfigured: false,
+      inheritedApiKey: false,
+      connected: codexConnected,
+      detail: codexStatus?.detail ?? (codexBinary ? "Codex login required" : "Codex CLI not found"),
+      models: codexModels,
+      defaultModel: "default",
+    },
+    {
+      id: "openrouter",
+      label: "OpenRouter",
+      binaryReady: codexBinary !== null,
+      accountConnected: false,
+      apiKeyConfigured: Boolean(openRouterKey),
+      inheritedApiKey: inheritedOpenRouterKey !== null,
+      connected: routerConnected,
+      detail: openRouterKey ? "OpenRouter API key ready" : "OpenRouter API key required",
+      models: routerModels,
+      defaultModel: routerModels[0]?.id ?? "~openai/gpt-latest",
+    },
+  ];
+}
 
 function emitMedia(event: MediaEvent): void {
   sendIfWindowAlive(win, MEDIA_CHANNELS.event, event);
@@ -190,6 +402,29 @@ function mediaWorker(): MediaWorkerClient {
 
 function settingsPath(): string {
   return join(app.getPath("userData"), "media-library-settings.json");
+}
+
+function windowStatePath(): string {
+  return join(app.getPath("userData"), "window-state.json");
+}
+
+function readWindowBounds(): WindowBounds | null {
+  const path = windowStatePath();
+  try {
+    const info = statSync(path);
+    if (!info.isFile() || info.size > WINDOW_STATE_LIMIT_BYTES) return null;
+    return parseWindowBounds(JSON.parse(readFileSync(path, "utf8")));
+  } catch {
+    return null;
+  }
+}
+
+async function writeWindowBounds(bounds: WindowBounds): Promise<void> {
+  const path = windowStatePath();
+  await mkdir(dirname(path), { recursive: true });
+  await guardedAtomicWrite(path, `${JSON.stringify(bounds)}\n`, {
+    maxBytes: WINDOW_STATE_LIMIT_BYTES,
+  });
 }
 
 async function readSettings(assertCurrent: () => void = () => undefined): Promise<AppSettings> {
@@ -258,6 +493,30 @@ function parseProjectScanQuery(value: unknown): ProjectScanQuery {
     throw new Error("Invalid intermediate scan option");
   }
   return { includeIntermediate };
+}
+
+function parseTerminalDimensions(value: unknown): TerminalDimensions {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid terminal dimensions");
+  }
+  const { cols, rows } = value as Record<string, unknown>;
+  if (typeof cols !== "number" || typeof rows !== "number") {
+    throw new Error("Invalid terminal dimensions");
+  }
+  return { cols, rows };
+}
+
+function assertTrustedSender(
+  event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent,
+): void {
+  if (
+    !win
+    || win.isDestroyed()
+    || event.sender !== win.webContents
+    || event.senderFrame !== win.webContents.mainFrame
+  ) {
+    throw new Error("Untrusted IPC sender");
+  }
 }
 
 async function refreshCatalog(
@@ -372,9 +631,158 @@ async function openLibrary(
 }
 
 function beginOpenOperation(): MediaSessionEpoch {
+  activeAgentSession?.stop();
   const operation = mediaState.beginOpen();
   worker?.cancelProject();
   return operation;
+}
+
+function parseAgentProvider(value: unknown, allowed: AgentProvider[]): AgentProvider {
+  if (typeof value === "string" && allowed.includes(value as AgentProvider)) {
+    return value as AgentProvider;
+  }
+  throw new Error("Invalid agent provider");
+}
+
+function registerAgentIpc(): void {
+  ipcMain.handle(AGENT_CHANNELS.providers, async (event) => {
+    assertTrustedSender(event);
+    return agentProviderStatuses();
+  });
+  ipcMain.handle(AGENT_CHANNELS.login, async (event, rawProvider: unknown) => {
+    assertTrustedSender(event);
+    const provider = parseAgentProvider(rawProvider, ["claude", "codex"]);
+    if (provider === "claude") {
+      const binary = await resolveClaudeBinary();
+      if (!binary) throw new Error("Install the Claude CLI before signing in");
+      await loginClaudeSubscription(binary);
+    } else {
+      const binary = await resolveCodexBinary();
+      if (!binary) throw new Error("Install the Codex CLI before signing in");
+      await loginCodex(binary);
+    }
+    return agentProviderStatuses();
+  });
+  ipcMain.handle(
+    AGENT_CHANNELS.setApiKey,
+    async (event, rawProvider: unknown, rawApiKey: unknown) => {
+      assertTrustedSender(event);
+      const provider = parseAgentProvider(rawProvider, ["claude", "openrouter"]);
+      const apiKey = parseString(rawApiKey, `${provider} API key`, 512);
+      if (provider === "claude") await credentialStore().write(apiKey);
+      else {
+        await openRouterStore().write(apiKey);
+        cachedOpenRouterModels = null;
+      }
+      return agentProviderStatuses();
+    },
+  );
+  ipcMain.handle(AGENT_CHANNELS.clearApiKey, async (event, rawProvider: unknown) => {
+    assertTrustedSender(event);
+    const provider = parseAgentProvider(rawProvider, ["claude", "openrouter"]);
+    if (provider === "claude") await credentialStore().clear();
+    else {
+      await openRouterStore().clear();
+      cachedOpenRouterModels = null;
+    }
+    return agentProviderStatuses();
+  });
+  ipcMain.handle(AGENT_CHANNELS.send, async (event, rawRequest: unknown) => {
+    assertTrustedSender(event);
+    if (agentTurnBusy) throw new Error("An agent is already working");
+    agentTurnBusy = true;
+    try {
+      const operation = mediaState.captureActive();
+      const request = parseAgentChatRequest(rawRequest);
+      const projectPath = request.project
+        ? await resolveProjectPath(
+          operation.rootPath,
+          request.project.workspaceId,
+          request.project.projectId,
+        )
+        : undefined;
+      mediaState.assertActive(operation);
+      const emit = (chatEvent: AgentChatEnvelope["event"]): void => {
+        const envelope: AgentChatEnvelope = {
+          rootPath: operation.rootPath,
+          chatId: request.chatId,
+          provider: request.provider,
+          event: chatEvent,
+        };
+        sendIfWindowAlive(win, AGENT_CHANNELS.event, envelope);
+      };
+
+      if (request.provider === "claude") {
+        const binary = await resolveClaudeBinary();
+        if (!binary) throw new Error("Claude CLI is not installed");
+        let apiKey: string | undefined;
+        if (request.claudeAuthMethod === "api-key") {
+          apiKey = await credentialStore().read() ?? inheritedAnthropicApiKey() ?? undefined;
+          if (!apiKey) throw new Error("Add an Anthropic API key before sending");
+        } else {
+          const status = await readClaudeAuthStatus(
+            binary,
+            claudeSubscriptionEnvironment(process.env),
+          ).catch(() => null);
+          if (!status?.loggedIn) throw new Error("Sign in to Claude before sending");
+        }
+        mediaState.assertActive(operation);
+        const session = new ClaudeSession({ binary, emit });
+        activeAgentSession = session;
+        try {
+          await session.run({
+            rootPath: operation.rootPath,
+            projectPath,
+            prompt: request.prompt,
+            model: request.model,
+            authMethod: request.claudeAuthMethod,
+            apiKey,
+            permissionMode: request.permissionMode,
+            resumeSessionId: request.resumeSessionId,
+          });
+        } finally {
+          if (activeAgentSession === session) activeAgentSession = null;
+        }
+        return;
+      }
+
+      const binary = await resolveCodexBinary();
+      if (!binary) throw new Error("Codex CLI is not installed");
+      let openRouterApiKey: string | undefined;
+      if (request.provider === "codex") {
+        const status = await readCodexAuthStatus(binary).catch(() => null);
+        if (!status?.loggedIn) throw new Error("Sign in to Codex before sending");
+      } else {
+        openRouterApiKey = await openRouterStore().read()
+          ?? inheritedOpenRouterApiKey()
+          ?? undefined;
+        if (!openRouterApiKey) throw new Error("Add an OpenRouter API key before sending");
+      }
+      mediaState.assertActive(operation);
+      const session = new CodexSession({ binary, emit });
+      activeAgentSession = session;
+      try {
+        await session.run({
+          rootPath: operation.rootPath,
+          projectPath,
+          prompt: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          openRouterApiKey,
+          permissionMode: request.permissionMode,
+          resumeSessionId: request.resumeSessionId,
+        });
+      } finally {
+        if (activeAgentSession === session) activeAgentSession = null;
+      }
+    } finally {
+      agentTurnBusy = false;
+    }
+  });
+  ipcMain.handle(AGENT_CHANNELS.stop, (event) => {
+    assertTrustedSender(event);
+    activeAgentSession?.stop();
+  });
 }
 
 async function mediaUrl(
@@ -503,6 +911,30 @@ function registerMediaIpc(): void {
       (resolvedPath) => shell.openPath(resolvedPath),
     );
   });
+  ipcMain.on(MEDIA_CHANNELS.startFileDrag, (event, rawPath: unknown) => {
+    try {
+      if (!win || event.sender !== win.webContents) {
+        throw new Error("Native drag source is unavailable");
+      }
+      const operation = mediaState.captureActive();
+      const path = parseString(rawPath, "drag path");
+      const resolvedPath = mediaState.fileAccess.resolveFileForDrag(
+        operation.rootPath,
+        path,
+      );
+      mediaState.assertActive(operation);
+      event.sender.startDrag({
+        file: resolvedPath,
+        icon: fileDragIcon(),
+      });
+    } catch (error) {
+      emitMedia({
+        type: "error",
+        operation: "drag-file",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
   ipcMain.handle(MEDIA_CHANNELS.copyText, (_event, rawText: unknown) => {
     const text = parseString(rawText, "clipboard text", CLIPBOARD_LIMIT);
     clipboard.writeText(text);
@@ -532,12 +964,69 @@ function registerMediaIpc(): void {
   });
 }
 
+function registerTerminalIpc(): void {
+  ipcMain.handle(TERMINAL_CHANNELS.create, async (event, rawDimensions: unknown) => {
+    assertTrustedSender(event);
+    const operation = mediaState.captureActive();
+    const session = await terminalManager.create(
+      operation.rootPath,
+      parseTerminalDimensions(rawDimensions),
+    );
+    try {
+      mediaState.assertActive(operation);
+      return session;
+    } catch (error) {
+      terminalManager.kill(session.id);
+      throw error;
+    }
+  });
+  ipcMain.on(
+    TERMINAL_CHANNELS.write,
+    (event, rawSessionId: unknown, rawData: unknown) => {
+      try {
+        assertTrustedSender(event);
+        terminalManager.write(
+          parseString(rawSessionId, "terminal session id", 128),
+          parseString(rawData, "terminal input", 64 * 1024),
+        );
+      } catch {
+        // Invalid fire-and-forget terminal input is ignored at the trust boundary.
+      }
+    },
+  );
+  ipcMain.on(
+    TERMINAL_CHANNELS.resize,
+    (event, rawSessionId: unknown, rawDimensions: unknown) => {
+      try {
+        assertTrustedSender(event);
+        terminalManager.resize(
+          parseString(rawSessionId, "terminal session id", 128),
+          parseTerminalDimensions(rawDimensions),
+        );
+      } catch {
+        // Stale resize events are expected while panes are being removed.
+      }
+    },
+  );
+  ipcMain.handle(TERMINAL_CHANNELS.kill, (event, rawSessionId: unknown) => {
+    assertTrustedSender(event);
+    terminalManager.kill(parseString(rawSessionId, "terminal session id", 128));
+  });
+}
+
 function createWindow(): void {
+  const savedBounds = readWindowBounds();
+  const initialBounds = savedBounds
+    ? fitWindowBounds(
+      savedBounds,
+      screen.getDisplayMatching(savedBounds).workArea,
+      MINIMUM_WINDOW_SIZE,
+    )
+    : DEFAULT_WINDOW_SIZE;
   const createdWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    minWidth: 1100,
-    minHeight: 720,
+    ...initialBounds,
+    minWidth: MINIMUM_WINDOW_SIZE.width,
+    minHeight: MINIMUM_WINDOW_SIZE.height,
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 16, y: 18 },
     vibrancy: "sidebar",
@@ -549,6 +1038,34 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
     },
+  });
+  const persistBounds = (): void => {
+    void writeWindowBounds(createdWindow.getNormalBounds()).catch(() => undefined);
+  };
+  createdWindow.on("resized", persistBounds);
+  createdWindow.on("moved", persistBounds);
+  createdWindow.on("close", persistBounds);
+  createdWindow.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const target = new URL(url);
+      if (target.protocol === "http:" || target.protocol === "https:") {
+        void shell.openExternal(target.toString());
+      }
+    } catch {
+      // Malformed links are ignored at the renderer trust boundary.
+    }
+    return { action: "deny" };
+  });
+  createdWindow.webContents.on("before-input-event", (event, input) => {
+    const command = input.meta && !input.alt && !input.control && !input.shift;
+    if (
+      input.type === "keyDown"
+      && command
+      && input.key.toLocaleLowerCase() === "r"
+    ) {
+      event.preventDefault();
+      sendIfWindowAlive(createdWindow, APP_CHANNELS.toggleRightPanel, undefined);
+    }
   });
   win = createdWindow;
   createdWindow.on("closed", () => {
@@ -569,6 +1086,10 @@ function createWindow(): void {
               if (
                 !document.querySelector(".workbench")
                 || !window.ralphy?.chooseLibrary
+                || !window.ralphy?.createTerminal
+                || !window.ralphy?.getAgentProviders
+                || !window.ralphy?.sendAgentMessage
+                || !window.ralphy?.onToggleRightPanel
                 || !CSS.supports("corner-shape", "squircle")
               ) return false;
               const fixture = document.createElement("div");
@@ -591,6 +1112,7 @@ function createWindow(): void {
             })()`,
           );
           if (ready) {
+            console.log("RALPHY_TERMINAL_BRIDGE_READY");
             console.log("RALPHY_SMOKE_READY");
             await new Promise((resolveReady) => setTimeout(resolveReady, 100));
             app.exit(0);
@@ -608,11 +1130,15 @@ function createWindow(): void {
 }
 
 function stopBackgroundResources(): void {
+  activeAgentSession?.stop();
   stopMediaRuntime(mediaState, { watcher, worker });
+  terminalManager.dispose();
   worker = null;
 }
 
 registerMediaIpc();
+registerTerminalIpc();
+registerAgentIpc();
 
 void app.whenReady().then(() => {
   protocol.handle("ralphy-media", async (request) => {

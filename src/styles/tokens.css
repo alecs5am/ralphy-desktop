@@ -15,6 +15,14 @@
 }
 
 @font-face {
+  font-family: "Andale Mono";
+  src: url("/assets/fonts/AndaleMono-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
   font-family: "AWS Diatype Mono";
   src: url("/assets/fonts/AWSDiatypeRoundedSemi-Mono-Bold.woff2") format("woff2");
   font-weight: 700;
@@ -53,7 +61,7 @@
   --line-strong: rgb(255 255 255 / 0.12);
 
   --font-sans: "AWS Diatype", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-  --font-mono: "AWS Diatype Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-mono: "AWS Diatype Mono", "Andale Mono", ui-monospace, "SF Mono", Menlo, monospace;
   --text-xs: 11px;
   --text-sm: 12px;
   --text-base: 13px;
@@ -88,7 +96,6 @@
   --space-8: 40px;
 
   --blur: blur(44px) saturate(180%);
-  --ring-focus: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
   --ring-select: 0 0 0 2px var(--accent);
   --shadow-pop: 0 8px 24px -6px rgb(0 0 0 / 0.7), 0 0 0 1px rgb(255 255 255 / 0.06);
   --shadow-window: 0 44px 96px -26px rgb(0 0 0 / 0.78);
@@ -97,6 +104,16 @@
   --dur-fast: 90ms;
   --dur: 160ms;
   --dur-slow: 220ms;
+
+  --dither-op: 1;
+  --p1: oklch(0.76 0.1 288);
+  --p2: oklch(0.76 0.1 238);
+  --p3: oklch(0.76 0.1 188);
+  --p4: oklch(0.76 0.1 148);
+  --p5: oklch(0.76 0.1 82);
+  --p6: oklch(0.76 0.1 32);
+  --p7: oklch(0.76 0.1 340);
+  --p8: oklch(0.76 0.1 208);
 }
 
 @supports (corner-shape: squircle) {
@@ -130,7 +147,11 @@
   .utility-right-panel,
   .profile-avatar,
   .workspace-picker-popover,
-  .workspace-picker-trigger,
+  .workspace-hero,
+  .workspace-hero-orb,
+  .project-glyph,
+  .sidebar-row,
+  .sidebar-nav-row,
   .video-controls,
   .image-zoom-controls,
   .inspector-preview {

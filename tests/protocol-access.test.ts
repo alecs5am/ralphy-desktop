@@ -1,4 +1,4 @@
-import { rm, writeFile } from "node:fs/promises";
+import { rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
@@ -133,6 +133,37 @@ describe("media protocol access", () => {
     await expect(
       access.resolveFile(fixture.rootPath, join(fixture.alphaPath, "misc.bin"), ["text"]),
     ).rejects.toThrow(/file type/i);
+  });
+
+  test("synchronously authorizes only real files from the current scan for native drag", async () => {
+    fixture = await makeLibraryFixture();
+    const access = new MediaProtocolAccess();
+    const result = await scanProject({
+      rootPath: fixture.rootPath,
+      workspaceId: "studio",
+      projectId: "alpha-001",
+      generation: 1,
+    });
+    access.replace(result);
+    const root = result.rootPath;
+    const brief = result.items.find(
+      (item) => item.projectRelativePath === "BRIEF.md",
+    )?.absolutePath;
+    expect(brief).toBeTruthy();
+    if (!brief) return;
+
+    expect(access.resolveFileForDrag(root, brief)).toBe(brief);
+    expect(() =>
+      access.resolveFileForDrag(
+        root,
+        join(root, "registry.json"),
+      )).toThrow(/selected project/i);
+
+    await rm(brief);
+    await symlink(join(root, "registry.json"), brief);
+    expect(() => access.resolveFileForDrag(root, brief)).toThrow(
+      /symbolic link/i,
+    );
   });
 
   test("reports partial Trash failures without invoking Trash for unauthorized paths", async () => {

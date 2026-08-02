@@ -1,8 +1,6 @@
 import {
   Boxes,
   CircleDollarSign,
-  Folder,
-  FolderOpen,
   Pin,
   Search,
   UsersRound,
@@ -18,7 +16,8 @@ import {
   sortWorkspaces,
   type WorkbenchRoute,
 } from "../state/workbench";
-import { ProfileAvatar, profileIdentity } from "./ProfileAvatar";
+import { projectGlyphSlot, projectGlyphVars } from "../lib/project-glyph";
+import { ProfileMenu } from "./ProfileMenu";
 import { SidebarChrome } from "./Titlebar";
 import { WorkspacePicker } from "./WorkspacePicker";
 
@@ -35,7 +34,7 @@ interface ContextSidebarProps {
   onBack(): void;
   onForward(): void;
   onToggleSidebar(): void;
-  onChooseLibrary(): void;
+  onOpenSettings(): void;
   onOpenWorkspace(workspaceId: string): void;
   onOpenProject(project: ProjectSummary): void;
   onToggleProjectPin(projectId: string): void;
@@ -105,7 +104,7 @@ export function ContextSidebar({
   onBack,
   onForward,
   onToggleSidebar,
-  onChooseLibrary,
+  onOpenSettings,
   onOpenWorkspace,
   onOpenProject,
   onToggleProjectPin,
@@ -153,8 +152,6 @@ export function ContextSidebar({
   const visibleItems = visibleProjects;
   const shownProjects = visibleProjects.slice(0, visibleLimit);
   const contextName = workspace?.name ?? "Workspaces";
-  const identity = profileIdentity(rootPath);
-
   return (
     <motion.aside
       className="context-sidebar panel-blur"
@@ -223,19 +220,6 @@ export function ContextSidebar({
         <span>Projects</span>
         <span className="sidebar-section-actions">
           <span>{visibleItems.length}</span>
-          <button
-            className={`icon-button${searchVisible ? " is-active" : ""}`}
-            type="button"
-            title="Filter projects"
-            aria-label="Filter projects"
-            aria-pressed={searchVisible}
-            onClick={() => {
-              setSearchVisible((visible) => !visible);
-              if (searchVisible) setQuery("");
-            }}
-          >
-            <Search size={14} strokeWidth={1.5} />
-          </button>
         </span>
       </div>
 
@@ -249,6 +233,7 @@ export function ContextSidebar({
               role="button"
               tabIndex={0}
               className={`sidebar-row${active ? " is-selected" : ""}`}
+              style={projectGlyphVars(project.name)}
               key={project.id}
               onClick={() => onOpenProject(project)}
               onKeyDown={(event) => {
@@ -258,7 +243,14 @@ export function ContextSidebar({
                 }
               }}
             >
-              <Folder size={16} strokeWidth={1.5} aria-hidden="true" />
+              {active && <span className="sidebar-row-field" aria-hidden="true" />}
+              <span
+                className="project-glyph"
+                data-glyph={projectGlyphSlot(project.name)}
+                aria-hidden="true"
+              >
+                <span className="project-glyph-mark" />
+              </span>
               <span className="sidebar-row-copy">
                 <span className="sidebar-row-title">{project.name}</span>
                 <span className="sidebar-row-meta">
@@ -297,20 +289,7 @@ export function ContextSidebar({
       </div>
 
       <div className="sidebar-footer">
-        <ProfileAvatar rootPath={rootPath} />
-        <span className="sidebar-profile-copy">
-          <strong>{identity}</strong>
-          <small title={rootPath}>.ralphy library</small>
-        </span>
-        <button
-          className="icon-button"
-          type="button"
-          title="Change .ralphy library"
-          aria-label="Change .ralphy library"
-          onClick={onChooseLibrary}
-        >
-          <FolderOpen size={15} strokeWidth={1.5} />
-        </button>
+        <ProfileMenu rootPath={rootPath} onOpenSettings={onOpenSettings} />
       </div>
     </motion.aside>
   );

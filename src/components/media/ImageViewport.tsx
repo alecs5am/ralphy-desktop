@@ -111,9 +111,14 @@ export function ImageViewport({ src, name, compact = false }: ImageViewportProps
       }`}
       ref={rootRef}
       onWheel={onWheel}
-      onAuxClick={(event) => event.preventDefault()}
       onPointerDown={(event) => {
-        if (compact || event.button !== 1) return;
+        if (
+          compact
+          || event.button !== 0
+          || (event.target as Element).closest("button")
+        ) {
+          return;
+        }
         event.preventDefault();
         drag.current = {
           pointerId: event.pointerId,

@@ -7,7 +7,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import type { MediaAnnotation, MediaItem } from "../lib/ipc";
+import type { AnnotationInput, MediaAnnotation, MediaItem } from "../lib/ipc";
 import { assetGridGeometry, type MediaGroupResult } from "../lib/media";
 import { AssetTile } from "./AssetTile";
 
@@ -18,6 +18,8 @@ interface VirtualAssetGridProps {
   selectedId: string | null;
   onSelect(item: MediaItem): void;
   onOpen(item: MediaItem): void;
+  onChange(item: MediaItem, annotation: AnnotationInput): void;
+  onTrash(item: MediaItem): void;
 }
 
 type VirtualGridRow =
@@ -31,6 +33,8 @@ export function VirtualAssetGrid({
   selectedId,
   onSelect,
   onOpen,
+  onChange,
+  onTrash,
 }: VirtualAssetGridProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
@@ -134,6 +138,8 @@ export function VirtualAssetGrid({
                   selected={selectedId === item.id}
                   onSelect={() => onSelect(item)}
                   onOpen={() => onOpen(item)}
+                  onChange={(annotation) => onChange(item, annotation)}
+                  onTrash={() => onTrash(item)}
                 />
               ))}
             </div>

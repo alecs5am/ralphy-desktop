@@ -75,6 +75,19 @@ function StreamingAudioPlayer({
   );
   const progress = duration > 0 ? currentTime / duration : 0;
 
+  useEffect(() => {
+    if (!playing) return;
+    let frame = 0;
+    const syncTime = () => {
+      const audio = audioRef.current;
+      if (!audio) return;
+      setCurrentTime(audio.currentTime);
+      frame = window.requestAnimationFrame(syncTime);
+    };
+    frame = window.requestAnimationFrame(syncTime);
+    return () => window.cancelAnimationFrame(frame);
+  }, [playing]);
+
   const togglePlayback = () => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -274,6 +287,19 @@ function DecodedAudioWaveform({
       wave?.destroy();
     };
   }, [compact, onFallback, src]);
+
+  useEffect(() => {
+    if (!playing) return;
+    let frame = 0;
+    const syncTime = () => {
+      const wave = waveRef.current;
+      if (!wave) return;
+      setCurrentTime(wave.getCurrentTime());
+      frame = window.requestAnimationFrame(syncTime);
+    };
+    frame = window.requestAnimationFrame(syncTime);
+    return () => window.cancelAnimationFrame(frame);
+  }, [playing]);
 
   const seek = (next: number) => {
     const wave = waveRef.current;

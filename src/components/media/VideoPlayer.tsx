@@ -44,6 +44,19 @@ export function VideoPlayer({ src, name, compact = false }: VideoPlayerProps) {
     setError(null);
   }, [src]);
 
+  useEffect(() => {
+    if (!playing) return;
+    let frame = 0;
+    const syncTime = () => {
+      const video = videoRef.current;
+      if (!video) return;
+      setCurrentTime(video.currentTime);
+      frame = window.requestAnimationFrame(syncTime);
+    };
+    frame = window.requestAnimationFrame(syncTime);
+    return () => window.cancelAnimationFrame(frame);
+  }, [playing]);
+
   const togglePlayback = () => {
     const video = videoRef.current;
     if (!video) return;
