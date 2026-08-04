@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
+import { type IpcResult, unwrapIpcResult } from "./ipc-security";
 import {
   AGENT_CHANNELS,
   APP_CHANNELS,
@@ -14,14 +15,19 @@ import {
   type TerminalEvent,
 } from "./media/types";
 
+async function invoke<Value>(channel: string, ...args: unknown[]): Promise<Value> {
+  return unwrapIpcResult(
+    await ipcRenderer.invoke(channel, ...args) as IpcResult<Value>,
+  );
+}
+
 const mediaBridge: MediaWorkbenchBridge = {
-  chooseLibrary: () => ipcRenderer.invoke(MEDIA_CHANNELS.chooseLibrary),
-  restoreLibrary: () => ipcRenderer.invoke(MEDIA_CHANNELS.restoreLibrary),
-  openLibrary: (rootPath) => ipcRenderer.invoke(MEDIA_CHANNELS.openLibrary, rootPath),
+  chooseLibrary: () => invoke(MEDIA_CHANNELS.chooseLibrary),
+  restoreLibrary: () => invoke(MEDIA_CHANNELS.restoreLibrary),
   scanProject: (project: ProjectReference, options?: ProjectScanQuery) => (
-    ipcRenderer.invoke(MEDIA_CHANNELS.scanProject, project, options)
+    invoke(MEDIA_CHANNELS.scanProject, project, options)
   ),
-  cancelProjectScan: () => ipcRenderer.invoke(MEDIA_CHANNELS.cancelProjectScan),
+  cancelProjectScan: () => invoke(MEDIA_CHANNELS.cancelProjectScan),
   onMediaEvent(callback: (event: MediaEvent) => void) {
     const listener = (_event: Electron.IpcRendererEvent, payload: MediaEvent): void => {
       callback(payload);
@@ -29,25 +35,26 @@ const mediaBridge: MediaWorkbenchBridge = {
     ipcRenderer.on(MEDIA_CHANNELS.event, listener);
     return () => ipcRenderer.removeListener(MEDIA_CHANNELS.event, listener);
   },
-  loadAnnotations: () => ipcRenderer.invoke(MEDIA_CHANNELS.loadAnnotations),
+  loadAnnotations: () => invoke(MEDIA_CHANNELS.loadAnnotations),
   updateAnnotations: (updates: Record<string, AnnotationInput>) => (
-    ipcRenderer.invoke(MEDIA_CHANNELS.updateAnnotations, updates)
+    invoke(MEDIA_CHANNELS.updateAnnotations, updates)
   ),
-  trashItems: (paths) => ipcRenderer.invoke(MEDIA_CHANNELS.trashItems, paths),
-  showInFinder: (path) => ipcRenderer.invoke(MEDIA_CHANNELS.showInFinder, path),
-  openExternal: (path) => ipcRenderer.invoke(MEDIA_CHANNELS.openExternal, path),
+  trashItems: (paths) => invoke(MEDIA_CHANNELS.trashItems, paths),
+  showInFinder: (path) => invoke(MEDIA_CHANNELS.showInFinder, path),
+  openExternal: (path) => invoke(MEDIA_CHANNELS.openExternal, path),
   startFileDrag: (path) => ipcRenderer.send(MEDIA_CHANNELS.startFileDrag, path),
-  copyText: (text) => ipcRenderer.invoke(MEDIA_CHANNELS.copyText, text),
-  readText: (path, maxBytes) => ipcRenderer.invoke(MEDIA_CHANNELS.readText, path, maxBytes),
-  getMediaUrl: (path) => ipcRenderer.invoke(MEDIA_CHANNELS.getMediaUrl, path),
-  createTerminal: (dimensions) => ipcRenderer.invoke(TERMINAL_CHANNELS.create, dimensions),
+  copyText: (text) => invoke(MEDIA_CHANNELS.copyText, text),
+  copyMigrationRecoveryCommand: () => invoke(MEDIA_CHANNELS.copyMigrationRecoveryCommand),
+  readText: (path, maxBytes) => invoke(MEDIA_CHANNELS.readText, path, maxBytes),
+  getMediaUrl: (path) => invoke(MEDIA_CHANNELS.getMediaUrl, path),
+  createTerminal: (dimensions) => invoke(TERMINAL_CHANNELS.create, dimensions),
   writeTerminal: (sessionId, data) => {
     ipcRenderer.send(TERMINAL_CHANNELS.write, sessionId, data);
   },
   resizeTerminal: (sessionId, dimensions) => {
     ipcRenderer.send(TERMINAL_CHANNELS.resize, sessionId, dimensions);
   },
-  killTerminal: (sessionId) => ipcRenderer.invoke(TERMINAL_CHANNELS.kill, sessionId),
+  killTerminal: (sessionId) => invoke(TERMINAL_CHANNELS.kill, sessionId),
   onTerminalEvent(callback: (event: TerminalEvent) => void) {
     const listener = (_event: Electron.IpcRendererEvent, payload: TerminalEvent): void => {
       callback(payload);
@@ -55,16 +62,16 @@ const mediaBridge: MediaWorkbenchBridge = {
     ipcRenderer.on(TERMINAL_CHANNELS.event, listener);
     return () => ipcRenderer.removeListener(TERMINAL_CHANNELS.event, listener);
   },
-  getAgentProviders: () => ipcRenderer.invoke(AGENT_CHANNELS.providers),
-  loginAgentProvider: (provider) => ipcRenderer.invoke(AGENT_CHANNELS.login, provider),
+  getAgentProviders: () => invoke(AGENT_CHANNELS.providers),
+  loginAgentProvider: (provider) => invoke(AGENT_CHANNELS.login, provider),
   setAgentApiKey: (provider, apiKey) => (
-    ipcRenderer.invoke(AGENT_CHANNELS.setApiKey, provider, apiKey)
+    invoke(AGENT_CHANNELS.setApiKey, provider, apiKey)
   ),
-  clearAgentApiKey: (provider) => ipcRenderer.invoke(AGENT_CHANNELS.clearApiKey, provider),
+  clearAgentApiKey: (provider) => invoke(AGENT_CHANNELS.clearApiKey, provider),
   sendAgentMessage: (request: AgentChatRequest) => (
-    ipcRenderer.invoke(AGENT_CHANNELS.send, request)
+    invoke(AGENT_CHANNELS.send, request)
   ),
-  stopAgent: () => ipcRenderer.invoke(AGENT_CHANNELS.stop),
+  stopAgent: () => invoke(AGENT_CHANNELS.stop),
   onAgentEvent(callback: (event: AgentChatEnvelope) => void) {
     const listener = (
       _event: Electron.IpcRendererEvent,

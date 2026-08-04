@@ -9,6 +9,11 @@ export interface RalphySessionOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+export interface RalphySessionOpenHooks {
+  beforePreviousClose?(): void | Promise<void>;
+  afterPreviousClose?(): void | Promise<void>;
+}
+
 interface ActiveSession {
   root: string;
   client: RalphyBridgeClient;
@@ -49,7 +54,7 @@ export class RalphySession {
     return this.#active.client;
   }
 
-  open(root: string): Promise<BridgeHello> {
+  open(root: string, hooks: RalphySessionOpenHooks = {}): Promise<BridgeHello> {
     const generation = ++this.#generation;
     const candidate = new RalphyBridgeClient({
       root,
@@ -58,7 +63,7 @@ export class RalphySession {
     });
     this.#starting.set(generation, candidate);
     void this.#closeStartingBefore(generation);
-    return this.#openCandidate(generation, root, candidate);
+    return this.#openCandidate(generation, root, candidate, hooks);
   }
 
   close(): Promise<void> {
@@ -76,6 +81,7 @@ export class RalphySession {
     generation: number,
     root: string,
     candidate: RalphyBridgeClient,
+    hooks: RalphySessionOpenHooks,
   ): Promise<BridgeHello> {
     let hello: BridgeHello;
     try {
@@ -94,9 +100,16 @@ export class RalphySession {
         throw this.#supersededError();
       }
       const previous = this.#active;
+      try {
+        await hooks.beforePreviousClose?.();
+      } catch (error) {
+        await candidate.close();
+        throw error;
+      }
       this.#active = { root, client: candidate, hello };
       this.#rootEpoch += 1;
       await previous?.client.close();
+      await hooks.afterPreviousClose?.();
       return hello;
     });
   }

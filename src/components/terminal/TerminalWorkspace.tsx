@@ -33,10 +33,8 @@ import { RalphyMascot } from "../RalphyMascot";
 const MAX_PENDING_OUTPUT = 1024 * 1024;
 
 function terminalTitle(session: TerminalSession): string {
-  const path = session.cwd.split("/").filter(Boolean);
-  const libraryName = path.at(-2) ?? ".ralphy";
   const shell = session.shell.split("/").at(-1) ?? "shell";
-  return `${libraryName} — ${shell}`;
+  return `${session.label} — ${shell}`;
 }
 
 interface LayoutViewProps {

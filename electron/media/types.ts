@@ -171,8 +171,18 @@ export interface ProjectScanRequest extends ProjectReference {
 }
 
 export interface LibraryOpenResult {
-  rootPath: string;
+  identity: RootIdentity;
   catalog: CatalogResult;
+}
+
+export interface RootIdentity {
+  storeId: string;
+  label: string;
+}
+
+export interface MigrationRecovery {
+  runId: string;
+  phase: string;
 }
 
 export interface TextReadResult {
@@ -193,7 +203,7 @@ export interface TerminalDimensions {
 
 export interface TerminalSession {
   id: string;
-  cwd: string;
+  label: string;
   shell: string;
   pid: number;
   status: "running" | "exited";
@@ -266,13 +276,15 @@ export interface AgentProviderStatus {
 }
 
 export interface AgentChatEnvelope {
-  rootPath: string;
+  storeId: string;
   chatId: string;
   provider: AgentProvider;
   event: AgentChatEvent;
 }
 
 export type MediaEvent =
+  | { type: "root-ready"; identity: RootIdentity }
+  | { type: "migration-recovery"; recovery: MigrationRecovery }
   | { type: "catalog-progress"; progress: CatalogProgress }
   | { type: "catalog-result"; result: CatalogResult }
   | { type: "project-progress"; progress: ProjectScanProgress }
@@ -283,7 +295,6 @@ export type MediaEvent =
 export interface MediaWorkbenchBridge {
   chooseLibrary(): Promise<LibraryOpenResult | null>;
   restoreLibrary(): Promise<LibraryOpenResult | null>;
-  openLibrary(rootPath: string): Promise<LibraryOpenResult>;
   scanProject(
     project: ProjectReference,
     options?: ProjectScanQuery,
@@ -297,6 +308,7 @@ export interface MediaWorkbenchBridge {
   openExternal(path: string): Promise<string>;
   startFileDrag(path: string): void;
   copyText(text: string): Promise<void>;
+  copyMigrationRecoveryCommand(): Promise<void>;
   readText(path: string, maxBytes?: number): Promise<TextReadResult>;
   getMediaUrl(path: string): Promise<MediaPreviewSource>;
   createTerminal(dimensions: TerminalDimensions): Promise<TerminalSession>;
@@ -324,7 +336,6 @@ export const APP_CHANNELS = {
 export const MEDIA_CHANNELS = {
   chooseLibrary: "media:library:choose",
   restoreLibrary: "media:library:restore",
-  openLibrary: "media:library:open",
   scanProject: "media:project:scan",
   cancelProjectScan: "media:project:cancel",
   event: "media:event",
@@ -335,6 +346,7 @@ export const MEDIA_CHANNELS = {
   openExternal: "media:files:open",
   startFileDrag: "media:files:drag",
   copyText: "media:clipboard:write",
+  copyMigrationRecoveryCommand: "media:migration:recovery-command",
   readText: "media:text:read",
   getMediaUrl: "media:url",
 } as const;

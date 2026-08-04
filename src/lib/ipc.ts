@@ -46,6 +46,7 @@ export type {
   MediaKind,
   MediaQueryOptions,
   MediaWorkbenchBridge,
+  MigrationRecovery,
   ProjectReference,
   ProjectMode,
   ProjectScanQuery,
@@ -53,6 +54,7 @@ export type {
   ProjectScanResult,
   ProjectSummary,
   ReviewStatus,
+  RootIdentity,
   TextReadResult,
   TerminalDimensions,
   TerminalEvent,
@@ -286,20 +288,19 @@ function createMockBridge(): RalphyBridge {
     for (const callback of mediaCallbacks) callback(event);
   };
   const openResult = (): LibraryOpenResult => ({
-    rootPath: MOCK_ROOT,
+    identity: { storeId: "mock-store", label: "ralphy-project" },
     catalog: mockCatalog(),
   });
 
   return {
     async chooseLibrary() {
       const result = openResult();
+      emitMedia({ type: "root-ready", identity: { storeId: "mock-store", label: "ralphy-project" } });
       emitMedia({ type: "catalog-result", result: result.catalog });
       return result;
     },
     async restoreLibrary() {
-      return openResult();
-    },
-    async openLibrary() {
+      emitMedia({ type: "root-ready", identity: { storeId: "mock-store", label: "ralphy-project" } });
       return openResult();
     },
     async scanProject(
@@ -353,6 +354,7 @@ function createMockBridge(): RalphyBridge {
     },
     startFileDrag() {},
     async copyText() {},
+    async copyMigrationRecoveryCommand() {},
     async readText(path, maxBytes = 256 * 1024) {
       const text = path.endsWith("BRIEF.md")
         ? "# Arc Grinder Launch\n\nA tactile 15-second creator review."
@@ -375,7 +377,7 @@ function createMockBridge(): RalphyBridge {
     async createTerminal(dimensions: TerminalDimensions): Promise<TerminalSession> {
       const session: TerminalSession = {
         id: `mock-terminal-${Date.now()}`,
-        cwd: MOCK_ROOT,
+        label: "ralphy-project",
         shell: "/bin/zsh",
         pid: 4242,
         status: "running",
@@ -474,7 +476,7 @@ function createMockBridge(): RalphyBridge {
     async sendAgentMessage(request: AgentChatRequest) {
       const emitAgent = (event: AgentChatEnvelope["event"]): void => {
         const envelope: AgentChatEnvelope = {
-          rootPath: MOCK_ROOT,
+          storeId: "mock-store",
           chatId: request.chatId,
           provider: request.provider,
           event,
@@ -508,4 +510,17 @@ function createMockBridge(): RalphyBridge {
 }
 
 const injectedBridge = typeof window === "undefined" ? undefined : window.ralphy;
+const rendererEnvironment = (import.meta as ImportMeta & {
+  env: Record<string, string | boolean | undefined>;
+}).env;
+export function mockBridgeAllowed(
+  environment: Record<string, string | boolean | undefined>,
+): boolean {
+  return environment.MODE === "test"
+    || environment.VITE_RALPHY_ENABLE_MOCKS === "true";
+}
+const mockBridgeEnabled = mockBridgeAllowed(rendererEnvironment);
+if (!injectedBridge && !mockBridgeEnabled) {
+  throw new Error("Ralphy Desktop IPC bridge is unavailable");
+}
 export const bridge: RalphyBridge = injectedBridge ?? createMockBridge();

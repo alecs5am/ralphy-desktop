@@ -560,7 +560,7 @@ export function useAgentChat({
   }, [rootPath, state, storage]);
 
   useEffect(() => bridge.onAgentEvent((envelope) => {
-    if (envelope.rootPath === rootPath) {
+    if (envelope.storeId === rootPath) {
       dispatch({
         type: "event",
         chatId: envelope.chatId,

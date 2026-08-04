@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { basename, dirname } from "node:path";
 
 import { validateLibraryRoot } from "../media/catalog";
 import type {
@@ -41,6 +42,7 @@ export type SpawnPty = (
 
 interface ManagedSession {
   process: PtyProcessLike;
+  rootPath: string;
   session: TerminalSession;
   dispose: () => void;
 }
@@ -140,7 +142,7 @@ export class TerminalManager {
     });
     const session: TerminalSession = {
       id: randomUUID(),
-      cwd,
+      label: basename(dirname(cwd)) || ".ralphy",
       shell: this.#shell,
       pid: process.pid,
       status: "running",
@@ -170,6 +172,7 @@ export class TerminalManager {
 
     this.#sessions.set(session.id, {
       process,
+      rootPath: cwd,
       session,
       dispose: () => {
         dataSubscription.dispose();
@@ -197,6 +200,15 @@ export class TerminalManager {
 
   killAll(): void {
     for (const { process } of this.#sessions.values()) process.kill();
+  }
+
+  terminateRoot(rootPath: string): void {
+    for (const [sessionId, managed] of this.#sessions) {
+      if (managed.rootPath !== rootPath) continue;
+      managed.dispose();
+      managed.process.kill();
+      this.#sessions.delete(sessionId);
+    }
   }
 
   dispose(): void {

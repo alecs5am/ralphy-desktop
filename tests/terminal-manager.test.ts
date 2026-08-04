@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { realpath, rm } from "node:fs/promises";
+import { basename } from "node:path";
 
 import { TerminalManager, type PtyProcessLike, type PtySpawnOptions } from "../electron/terminal/manager";
 import { makeLibraryFixture } from "./fixtures";
@@ -83,11 +84,12 @@ describe("TerminalManager", () => {
     const session = await harness.manager.create(fixture.rootPath, { cols: 120, rows: 36 });
 
     expect(session).toMatchObject({
-      cwd: canonicalRoot,
+      label: basename(fixture.parentPath),
       pid: 9000,
       shell: "/bin/zsh",
       status: "running",
     });
+    expect(session).not.toHaveProperty("cwd");
     expect(harness.spawns).toEqual([
       {
         file: "/bin/zsh",
@@ -174,5 +176,22 @@ describe("TerminalManager", () => {
     );
     harness.manager.killAll();
     expect(harness.processes.slice(0, 16).every((process) => process.kills.length === 1)).toBe(true);
+  });
+
+  test("terminates only terminals owned by the switched root", async () => {
+    const first = await makeLibraryFixture();
+    const second = await makeLibraryFixture();
+    fixtureRoots.push(first.parentPath, second.parentPath);
+    const harness = createHarness();
+    await harness.manager.create(first.rootPath, { cols: 80, rows: 24 });
+    const kept = await harness.manager.create(second.rootPath, { cols: 80, rows: 24 });
+
+    expect(harness.manager).toHaveProperty("terminateRoot");
+    (harness.manager as TerminalManager & { terminateRoot(root: string): void })
+      .terminateRoot(await realpath(first.rootPath));
+
+    expect(harness.processes[0]?.kills).toEqual([undefined]);
+    expect(harness.processes[1]?.kills).toEqual([]);
+    expect(harness.manager.list()).toEqual([kept]);
   });
 });

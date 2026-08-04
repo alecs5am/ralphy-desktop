@@ -3,6 +3,17 @@ import { describe, expect, test } from "vitest";
 import { parseAgentChatRequest } from "../electron/agent/request";
 
 describe("agent chat IPC request", () => {
+  test("rejects renderer-supplied root ownership", () => {
+    expect(() => parseAgentChatRequest({
+      chatId: "chat-1",
+      provider: "codex",
+      model: "default",
+      prompt: "Hi",
+      permissionMode: "full",
+      rootPath: "/tmp/attacker/.ralphy",
+    })).toThrow("root binding");
+  });
+
   test("accepts bounded provider, model, chat, session, and project fields", () => {
     expect(parseAgentChatRequest({
       chatId: "chat-123",

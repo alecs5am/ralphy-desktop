@@ -42,6 +42,9 @@ export function parseAgentChatRequest(value: unknown): AgentChatRequest {
     throw new Error("Invalid agent chat request");
   }
   const row = value as Record<string, unknown>;
+  if (Object.hasOwn(row, "rootPath") || Object.hasOwn(row, "storeId")) {
+    throw new Error("Agent root binding is main-owned");
+  }
   const prompt = typeof row.prompt === "string" ? row.prompt.trim() : "";
   if (!prompt || Buffer.byteLength(prompt) > MAX_PROMPT_BYTES) {
     throw new Error("Invalid agent prompt");

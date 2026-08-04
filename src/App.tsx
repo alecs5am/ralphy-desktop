@@ -20,10 +20,13 @@ import {
   bridge,
   type MediaAnnotation,
   type MediaItem,
+  type MigrationRecovery,
   type ProjectSummary,
+  type RootIdentity,
 } from "./lib/ipc";
 import { LibraryScreen } from "./screens/LibraryScreen";
 import { WorkspaceScreen } from "./screens/WorkspaceScreen";
+import { MigrationRecoveryScreen } from "./screens/MigrationRecoveryScreen";
 import {
   createInitialWorkbenchState,
   mostRecentWorkspaceId,
@@ -61,6 +64,8 @@ export function App() {
     createInitialWorkbenchState,
   );
   const [restoring, setRestoring] = useState(true);
+  const [rootIdentity, setRootIdentity] = useState<RootIdentity | null>(null);
+  const [migrationRecovery, setMigrationRecovery] = useState<MigrationRecovery | null>(null);
   const [welcomeVisible, setWelcomeVisible] = useState(true);
   const [welcomeExiting, setWelcomeExiting] = useState(false);
   const [projectLoading, setProjectLoading] = useState(false);
@@ -118,7 +123,7 @@ export function App() {
     ) ?? null;
   }, [projects, state.route]);
   const agentChat = useAgentChat({
-    rootPath: catalog?.rootPath ?? null,
+    rootPath: rootIdentity?.storeId ?? null,
     project: selectedProject,
     enabled: rightPanelVisible,
   });
@@ -144,7 +149,12 @@ export function App() {
 
   useEffect(() => {
     const unsubscribe = bridge.onMediaEvent((event) => {
-      if (event.type === "catalog-result") {
+      if (event.type === "root-ready") {
+        setRootIdentity(event.identity);
+        setMigrationRecovery(null);
+      } else if (event.type === "migration-recovery") {
+        setMigrationRecovery(event.recovery);
+      } else if (event.type === "catalog-result") {
         dispatch({ type: "catalog-received", catalog: event.result });
       } else if (event.type === "project-result") {
         dispatch({ type: "project-received", project: event.result });
@@ -161,7 +171,7 @@ export function App() {
           if (!result) return;
           const saved = initialPreferences.current;
           const savedWorkspace =
-            saved.rootPath === result.rootPath &&
+            saved.rootPath === result.identity.storeId &&
             saved.workspaceId &&
             result.catalog.workspaces.some(
               (workspace) => workspace.id === saved.workspaceId,
@@ -178,7 +188,7 @@ export function App() {
           void bridge.loadAnnotations().then((store) => setAnnotations(store.items));
           if (
             workspaceId &&
-            saved.rootPath === result.rootPath &&
+            saved.rootPath === result.identity.storeId &&
             saved.projectId &&
             result.catalog.projects.some(
               (project) =>
@@ -300,7 +310,7 @@ export function App() {
     const projectId = state.route.kind === "project" ? state.route.projectId : null;
     const timer = window.setTimeout(() => {
       writeWorkbenchPreferences(localStorage, {
-        rootPath: catalog?.rootPath ?? null,
+        rootPath: rootIdentity?.storeId ?? null,
         workspaceId,
         projectId,
         pinnedWorkspaceIds: state.pinnedWorkspaceIds,
@@ -318,7 +328,7 @@ export function App() {
   }, [
     bottomPanelHeight,
     bottomPanelVisible,
-    catalog?.rootPath,
+    rootIdentity?.storeId,
     rightPanelWidth,
     rightPanelVisible,
     sidebarWidth,
@@ -454,6 +464,20 @@ export function App() {
     }
   };
 
+  if (migrationRecovery) {
+    return (
+      <MigrationRecoveryScreen
+        recovery={migrationRecovery}
+        onCopyCommand={() => {
+          void bridge.copyMigrationRecoveryCommand().catch((cause: unknown) => {
+            setError(cause instanceof Error ? cause.message : String(cause));
+          });
+        }}
+        onChooseLibrary={() => void chooseLibrary()}
+      />
+    );
+  }
+
   if (welcomeVisible) {
     return <WelcomeScreen exiting={welcomeExiting} restoring={restoring} />;
   }
@@ -534,7 +558,7 @@ export function App() {
             {catalog && sidebarVisible && (
               <ContextSidebar
                 route={state.route}
-                rootPath={catalog.rootPath}
+                rootPath={rootIdentity?.storeId ?? catalog.rootPath}
                 workspaces={workspaces}
                 projects={projects}
                 pinnedWorkspaceIds={state.pinnedWorkspaceIds}
@@ -608,7 +632,7 @@ export function App() {
             <BottomPanel
               height={bottomPanelHeight}
               visible={bottomPanelVisible}
-              rootPath={catalog?.rootPath ?? null}
+              rootPath={rootIdentity?.storeId ?? null}
             />
           </motion.section>
           {showRightPanel && (
@@ -673,7 +697,7 @@ export function App() {
             {settingsVisible && (
               <Suspense fallback={null}>
                 <SettingsScreen
-                  rootPath={catalog?.rootPath ?? null}
+                  rootPath={rootIdentity?.storeId ?? null}
                   onBack={() => setSettingsVisible(false)}
                   onChooseLibrary={() => void chooseLibrary()}
                 />

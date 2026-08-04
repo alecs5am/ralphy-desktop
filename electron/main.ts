@@ -9,12 +9,13 @@ import {
   protocol,
   safeStorage,
   screen,
+  session as electronSession,
   shell,
 } from "electron";
 import { readFileSync, statSync } from "node:fs";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import { Worker } from "node:worker_threads";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import * as nodePty from "node-pty";
 import {
@@ -44,6 +45,7 @@ import {
 } from "./claude/session";
 import { loadAnnotations, updateAnnotations } from "./media/annotations";
 import {
+  InvalidLibraryRootError,
   readBoundedText,
   resolveProjectPath,
   validateLibraryRoot,
@@ -85,12 +87,26 @@ import {
   guardedSideEffect,
   type MediaSessionEpoch,
   MediaSessionState,
-  restorePersistedLibrary,
   sendIfWindowAlive,
   StaleMediaSessionError,
   stopMediaRuntime,
 } from "./media/session";
 import { TerminalManager } from "./terminal/manager";
+import { RalphySession } from "./ralphy/session";
+import { openRootSession, type RootIdentity } from "./root-session";
+import {
+  findMigrationRecovery,
+  migrationRecoveryFromError,
+  recoveryCommand,
+  type MainMigrationRecovery,
+} from "./migration-recovery";
+import {
+  assertTrustedSender as assertIpcSender,
+  denyPermissionRequest,
+  isTrustedNavigation,
+  secureWebPreferences,
+  toIpcResult,
+} from "./ipc-security";
 import {
   fitWindowBounds,
   parseWindowBounds,
@@ -112,6 +128,8 @@ let openRouterCredentialStore: EncryptedCredentialStore | null = null;
 let activeAgentSession: { stop(): void } | null = null;
 let agentTurnBusy = false;
 let cachedOpenRouterModels: { at: number; models: AgentProviderStatus["models"] } | null = null;
+const ralphySession = new RalphySession();
+let migrationRecovery: MainMigrationRecovery | null = null;
 
 function fileDragIcon(): Electron.NativeImage {
   if (cachedFileDragIcon) return cachedFileDragIcon;
@@ -506,17 +524,35 @@ function parseTerminalDimensions(value: unknown): TerminalDimensions {
   return { cols, rows };
 }
 
+function captureBridgeRoot(): { rootPath: string; storeId: string; epoch: number } {
+  const rootPath = ralphySession.root;
+  const hello = ralphySession.hello;
+  if (!rootPath || !hello) throw new Error("No active Ralphy library");
+  return { rootPath, storeId: hello.storeId, epoch: ralphySession.rootEpoch };
+}
+
+function assertBridgeRoot(binding: { rootPath: string; storeId: string; epoch: number }): void {
+  if (
+    ralphySession.root !== binding.rootPath
+    || ralphySession.hello?.storeId !== binding.storeId
+    || ralphySession.rootEpoch !== binding.epoch
+  ) throw new StaleMediaSessionError();
+}
+
 function assertTrustedSender(
   event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent,
 ): void {
-  if (
-    !win
-    || win.isDestroyed()
-    || event.sender !== win.webContents
-    || event.senderFrame !== win.webContents.mainFrame
-  ) {
-    throw new Error("Untrusted IPC sender");
-  }
+  assertIpcSender(event, win);
+}
+
+function securedHandle(
+  channel: string,
+  listener: (event: Electron.IpcMainInvokeEvent, ...args: any[]) => unknown,
+): void {
+  ipcMain.handle(channel, (event, ...args) => toIpcResult(() => {
+    assertTrustedSender(event);
+    return listener(event, ...args);
+  }));
 }
 
 async function refreshCatalog(
@@ -608,33 +644,79 @@ function createWatcher(rootPath: string): LibraryWatcher {
 }
 
 async function openLibrary(
-  operation: MediaSessionEpoch,
   rootPath: string,
 ): Promise<LibraryOpenResult> {
+  const interrupted = await findMigrationRecovery(rootPath);
+  if (interrupted) throw new MigrationRecoveryRequired(interrupted);
   const root = await validateLibraryRoot(rootPath);
-  mediaState.assertOpen(operation);
-  const catalog = await refreshCatalog(operation, root, false);
-  mediaState.assertOpen(operation);
-  const active = await watcher.replace({
-    assertCurrent: () => mediaState.assertOpen(operation),
-    create: () => createWatcher(root),
-    prepare: () => writeSettings(
-      { lastLibrary: root },
-      () => mediaState.assertOpen(operation),
-    ),
-    commit: () => mediaState.completeOpen(operation, root),
-  });
-  mediaState.assertActive(active);
+
+  let identity: RootIdentity;
+  let catalog: CatalogResult | null = null;
+  try {
+    identity = await openRootSession({
+      session: ralphySession,
+      root,
+      label: basename(dirname(root)) || ".ralphy",
+      prepare: async () => {
+        const operation = mediaState.beginOpen();
+        worker?.cancelProject();
+        try {
+          const nextCatalog = await refreshCatalog(operation, root, false);
+          mediaState.assertOpen(operation);
+          const active = await watcher.replace({
+            assertCurrent: () => mediaState.assertOpen(operation),
+            create: () => createWatcher(root),
+            prepare: () => writeSettings(
+              { lastLibrary: root },
+              () => mediaState.assertOpen(operation),
+            ),
+            commit: () => mediaState.completeOpen(operation, root),
+          });
+          mediaState.assertActive(active);
+          catalog = nextCatalog;
+        } catch (error) {
+          mediaState.abortOpen(operation);
+          throw error;
+        }
+      },
+      invalidateFileTokens: () => mediaState.fileAccess.clear(),
+      stopAgentTurns: () => activeAgentSession?.stop(),
+      terminateTerminals: (previousRoot) => terminalManager.terminateRoot(previousRoot),
+      subscribeActivity: async (_client, afterSequence) => {
+        await ralphySession.client.request("activity.subscribe", { afterSequence }).catch(() => {
+          emitMedia({
+            type: "error",
+            operation: "activity-subscribe",
+            message: "Live activity updates are unavailable",
+          });
+        });
+      },
+    });
+  } catch (error) {
+    const recovery = migrationRecoveryFromError(error);
+    if (recovery) throw new MigrationRecoveryRequired(recovery);
+    throw error;
+  }
+  if (!catalog) throw new Error("Library startup did not produce a catalog");
+  migrationRecovery = null;
+  emitMedia({ type: "root-ready", identity });
   emitMedia({ type: "catalog-result", result: catalog });
-  mediaState.assertActive(active);
-  return { rootPath: root, catalog };
+  return { identity, catalog };
 }
 
-function beginOpenOperation(): MediaSessionEpoch {
-  activeAgentSession?.stop();
-  const operation = mediaState.beginOpen();
-  worker?.cancelProject();
-  return operation;
+class MigrationRecoveryRequired extends Error {
+  constructor(readonly recovery: MainMigrationRecovery) {
+    super("Migration recovery required");
+    this.name = "MigrationRecoveryRequired";
+  }
+}
+
+function showMigrationRecovery(recovery: MainMigrationRecovery): void {
+  migrationRecovery = recovery;
+  emitMedia({
+    type: "migration-recovery",
+    recovery: { runId: recovery.runId, phase: recovery.phase },
+  });
 }
 
 function parseAgentProvider(value: unknown, allowed: AgentProvider[]): AgentProvider {
@@ -645,11 +727,11 @@ function parseAgentProvider(value: unknown, allowed: AgentProvider[]): AgentProv
 }
 
 function registerAgentIpc(): void {
-  ipcMain.handle(AGENT_CHANNELS.providers, async (event) => {
+  securedHandle(AGENT_CHANNELS.providers, async (event) => {
     assertTrustedSender(event);
     return agentProviderStatuses();
   });
-  ipcMain.handle(AGENT_CHANNELS.login, async (event, rawProvider: unknown) => {
+  securedHandle(AGENT_CHANNELS.login, async (event, rawProvider: unknown) => {
     assertTrustedSender(event);
     const provider = parseAgentProvider(rawProvider, ["claude", "codex"]);
     if (provider === "claude") {
@@ -663,7 +745,7 @@ function registerAgentIpc(): void {
     }
     return agentProviderStatuses();
   });
-  ipcMain.handle(
+  securedHandle(
     AGENT_CHANNELS.setApiKey,
     async (event, rawProvider: unknown, rawApiKey: unknown) => {
       assertTrustedSender(event);
@@ -677,7 +759,7 @@ function registerAgentIpc(): void {
       return agentProviderStatuses();
     },
   );
-  ipcMain.handle(AGENT_CHANNELS.clearApiKey, async (event, rawProvider: unknown) => {
+  securedHandle(AGENT_CHANNELS.clearApiKey, async (event, rawProvider: unknown) => {
     assertTrustedSender(event);
     const provider = parseAgentProvider(rawProvider, ["claude", "openrouter"]);
     if (provider === "claude") await credentialStore().clear();
@@ -687,12 +769,12 @@ function registerAgentIpc(): void {
     }
     return agentProviderStatuses();
   });
-  ipcMain.handle(AGENT_CHANNELS.send, async (event, rawRequest: unknown) => {
+  securedHandle(AGENT_CHANNELS.send, async (event, rawRequest: unknown) => {
     assertTrustedSender(event);
     if (agentTurnBusy) throw new Error("An agent is already working");
     agentTurnBusy = true;
     try {
-      const operation = mediaState.captureActive();
+      const operation = captureBridgeRoot();
       const request = parseAgentChatRequest(rawRequest);
       const projectPath = request.project
         ? await resolveProjectPath(
@@ -701,10 +783,10 @@ function registerAgentIpc(): void {
           request.project.projectId,
         )
         : undefined;
-      mediaState.assertActive(operation);
+      assertBridgeRoot(operation);
       const emit = (chatEvent: AgentChatEnvelope["event"]): void => {
         const envelope: AgentChatEnvelope = {
-          rootPath: operation.rootPath,
+          storeId: operation.storeId,
           chatId: request.chatId,
           provider: request.provider,
           event: chatEvent,
@@ -726,7 +808,7 @@ function registerAgentIpc(): void {
           ).catch(() => null);
           if (!status?.loggedIn) throw new Error("Sign in to Claude before sending");
         }
-        mediaState.assertActive(operation);
+        assertBridgeRoot(operation);
         const session = new ClaudeSession({ binary, emit });
         activeAgentSession = session;
         try {
@@ -758,7 +840,7 @@ function registerAgentIpc(): void {
           ?? undefined;
         if (!openRouterApiKey) throw new Error("Add an OpenRouter API key before sending");
       }
-      mediaState.assertActive(operation);
+      assertBridgeRoot(operation);
       const session = new CodexSession({ binary, emit });
       activeAgentSession = session;
       try {
@@ -779,7 +861,7 @@ function registerAgentIpc(): void {
       agentTurnBusy = false;
     }
   });
-  ipcMain.handle(AGENT_CHANNELS.stop, (event) => {
+  securedHandle(AGENT_CHANNELS.stop, (event) => {
     assertTrustedSender(event);
     activeAgentSession?.stop();
   });
@@ -800,8 +882,7 @@ async function mediaUrl(
 }
 
 function registerMediaIpc(): void {
-  ipcMain.handle(MEDIA_CHANNELS.chooseLibrary, async () => {
-    const operation = beginOpenOperation();
+  securedHandle(MEDIA_CHANNELS.chooseLibrary, async () => {
     const options: Electron.OpenDialogOptions = {
       title: "Choose Ralphy Library",
       message: "Choose a .ralphy directory",
@@ -811,38 +892,33 @@ function registerMediaIpc(): void {
       const result = win
         ? await dialog.showOpenDialog(win, options)
         : await dialog.showOpenDialog(options);
-      mediaState.assertOpen(operation);
-      if (result.canceled || !result.filePaths[0]) {
-        mediaState.abortOpen(operation);
+      if (result.canceled || !result.filePaths[0]) return null;
+      return await openLibrary(result.filePaths[0]);
+    } catch (error) {
+      if (error instanceof MigrationRecoveryRequired) {
+        showMigrationRecovery(error.recovery);
         return null;
       }
-      return await openLibrary(operation, result.filePaths[0]);
-    } catch (error) {
-      mediaState.abortOpen(operation);
       throw error;
     }
   });
-  ipcMain.handle(MEDIA_CHANNELS.restoreLibrary, () => {
-    return restoreLibrary(() => {
-      const operation = beginOpenOperation();
-      return restorePersistedLibrary(
-        mediaState,
-        operation,
-        async (assertCurrent) => (await readSettings(assertCurrent)).lastLibrary,
-        openLibrary,
-      );
+  securedHandle(MEDIA_CHANNELS.restoreLibrary, () => {
+    return restoreLibrary(async () => {
+      const root = (await readSettings()).lastLibrary;
+      if (!root) return null;
+      try {
+        return await openLibrary(root);
+      } catch (error) {
+        if (error instanceof MigrationRecoveryRequired) {
+          showMigrationRecovery(error.recovery);
+          return null;
+        }
+        if (error instanceof InvalidLibraryRootError) return null;
+        throw error;
+      }
     });
   });
-  ipcMain.handle(MEDIA_CHANNELS.openLibrary, async (_event, rootPath: unknown) => {
-    const operation = beginOpenOperation();
-    try {
-      return await openLibrary(operation, parseString(rootPath, "library path"));
-    } catch (error) {
-      mediaState.abortOpen(operation);
-      throw error;
-    }
-  });
-  ipcMain.handle(MEDIA_CHANNELS.scanProject, (_event, project: unknown, options: unknown) => {
+  securedHandle(MEDIA_CHANNELS.scanProject, (_event, project: unknown, options: unknown) => {
     const operation = mediaState.beginProjectSelection();
     worker?.cancelProject();
     return scanSelectedProject(
@@ -851,11 +927,11 @@ function registerMediaIpc(): void {
       parseProjectScanQuery(options),
     );
   });
-  ipcMain.handle(MEDIA_CHANNELS.cancelProjectScan, () => {
+  securedHandle(MEDIA_CHANNELS.cancelProjectScan, () => {
     mediaState.cancelProject();
     worker?.cancelProject();
   });
-  ipcMain.handle(MEDIA_CHANNELS.loadAnnotations, () => {
+  securedHandle(MEDIA_CHANNELS.loadAnnotations, () => {
     const operation = mediaState.captureActive();
     const assertCurrent = (): void => mediaState.assertActive(operation);
     return guardedResult(
@@ -864,7 +940,7 @@ function registerMediaIpc(): void {
       () => loadAnnotations(operation.rootPath, { assertCurrent }),
     );
   });
-  ipcMain.handle(MEDIA_CHANNELS.updateAnnotations, (_event, updates: unknown) => {
+  securedHandle(MEDIA_CHANNELS.updateAnnotations, (_event, updates: unknown) => {
     const operation = mediaState.captureActive();
     const assertCurrent = (): void => mediaState.assertActive(operation);
     return guardedResult(
@@ -873,7 +949,7 @@ function registerMediaIpc(): void {
       () => updateAnnotations(operation.rootPath, updates, { assertCurrent }),
     );
   });
-  ipcMain.handle(MEDIA_CHANNELS.trashItems, (_event, rawPaths: unknown) => {
+  securedHandle(MEDIA_CHANNELS.trashItems, (_event, rawPaths: unknown) => {
     const operation = mediaState.captureActive();
     if (
       !Array.isArray(rawPaths)
@@ -891,7 +967,7 @@ function registerMediaIpc(): void {
       () => mediaState.assertActive(operation),
     );
   });
-  ipcMain.handle(MEDIA_CHANNELS.showInFinder, (_event, rawPath: unknown) => {
+  securedHandle(MEDIA_CHANNELS.showInFinder, (_event, rawPath: unknown) => {
     const operation = mediaState.captureActive();
     const path = parseString(rawPath, "Finder path");
     return guardedSideEffect(
@@ -901,7 +977,7 @@ function registerMediaIpc(): void {
       (resolvedPath) => shell.showItemInFolder(resolvedPath),
     );
   });
-  ipcMain.handle(MEDIA_CHANNELS.openExternal, (_event, rawPath: unknown) => {
+  securedHandle(MEDIA_CHANNELS.openExternal, (_event, rawPath: unknown) => {
     const operation = mediaState.captureActive();
     const path = parseString(rawPath, "external path");
     return guardedSideEffect(
@@ -913,9 +989,7 @@ function registerMediaIpc(): void {
   });
   ipcMain.on(MEDIA_CHANNELS.startFileDrag, (event, rawPath: unknown) => {
     try {
-      if (!win || event.sender !== win.webContents) {
-        throw new Error("Native drag source is unavailable");
-      }
+      assertTrustedSender(event);
       const operation = mediaState.captureActive();
       const path = parseString(rawPath, "drag path");
       const resolvedPath = mediaState.fileAccess.resolveFileForDrag(
@@ -935,11 +1009,15 @@ function registerMediaIpc(): void {
       });
     }
   });
-  ipcMain.handle(MEDIA_CHANNELS.copyText, (_event, rawText: unknown) => {
+  securedHandle(MEDIA_CHANNELS.copyText, (_event, rawText: unknown) => {
     const text = parseString(rawText, "clipboard text", CLIPBOARD_LIMIT);
     clipboard.writeText(text);
   });
-  ipcMain.handle(
+  securedHandle(MEDIA_CHANNELS.copyMigrationRecoveryCommand, () => {
+    if (!migrationRecovery) throw new Error("No migration recovery is active");
+    clipboard.writeText(recoveryCommand(migrationRecovery));
+  });
+  securedHandle(
     MEDIA_CHANNELS.readText,
     (_event, rawPath: unknown, rawMaxBytes?: unknown) => {
       const operation = mediaState.captureActive();
@@ -958,22 +1036,22 @@ function registerMediaIpc(): void {
       });
     },
   );
-  ipcMain.handle(MEDIA_CHANNELS.getMediaUrl, (_event, rawPath: unknown) => {
+  securedHandle(MEDIA_CHANNELS.getMediaUrl, (_event, rawPath: unknown) => {
     const operation = mediaState.captureActive();
     return mediaUrl(operation, parseString(rawPath, "media path"));
   });
 }
 
 function registerTerminalIpc(): void {
-  ipcMain.handle(TERMINAL_CHANNELS.create, async (event, rawDimensions: unknown) => {
+  securedHandle(TERMINAL_CHANNELS.create, async (event, rawDimensions: unknown) => {
     assertTrustedSender(event);
-    const operation = mediaState.captureActive();
+    const operation = captureBridgeRoot();
     const session = await terminalManager.create(
       operation.rootPath,
       parseTerminalDimensions(rawDimensions),
     );
     try {
-      mediaState.assertActive(operation);
+      assertBridgeRoot(operation);
       return session;
     } catch (error) {
       terminalManager.kill(session.id);
@@ -1008,7 +1086,7 @@ function registerTerminalIpc(): void {
       }
     },
   );
-  ipcMain.handle(TERMINAL_CHANNELS.kill, (event, rawSessionId: unknown) => {
+  securedHandle(TERMINAL_CHANNELS.kill, (event, rawSessionId: unknown) => {
     assertTrustedSender(event);
     terminalManager.kill(parseString(rawSessionId, "terminal session id", 128));
   });
@@ -1023,6 +1101,8 @@ function createWindow(): void {
       MINIMUM_WINDOW_SIZE,
     )
     : DEFAULT_WINDOW_SIZE;
+  const devUrl = process.env.VITE_DEV_SERVER_URL;
+  const rendererUrl = devUrl ?? pathToFileURL(RENDERER).toString();
   const createdWindow = new BrowserWindow({
     ...initialBounds,
     minWidth: MINIMUM_WINDOW_SIZE.width,
@@ -1033,11 +1113,7 @@ function createWindow(): void {
     visualEffectState: "active",
     backgroundColor: "#00000000",
     show: !SMOKE_TEST,
-    webPreferences: {
-      preload: join(__dirname, "preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
+    webPreferences: secureWebPreferences(join(__dirname, "preload.cjs")),
   });
   const persistBounds = (): void => {
     void writeWindowBounds(createdWindow.getNormalBounds()).catch(() => undefined);
@@ -1055,6 +1131,9 @@ function createWindow(): void {
       // Malformed links are ignored at the renderer trust boundary.
     }
     return { action: "deny" };
+  });
+  createdWindow.webContents.on("will-navigate", (event, url) => {
+    if (!isTrustedNavigation(url, rendererUrl)) event.preventDefault();
   });
   createdWindow.webContents.on("before-input-event", (event, input) => {
     const command = input.meta && !input.alt && !input.control && !input.shift;
@@ -1074,7 +1153,6 @@ function createWindow(): void {
       stopBackgroundResources();
     }
   });
-  const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) void createdWindow.loadURL(devUrl);
   else void createdWindow.loadFile(RENDERER);
   if (SMOKE_TEST) {
@@ -1131,6 +1209,7 @@ function createWindow(): void {
 
 function stopBackgroundResources(): void {
   activeAgentSession?.stop();
+  void ralphySession.close();
   stopMediaRuntime(mediaState, { watcher, worker });
   terminalManager.dispose();
   worker = null;
@@ -1141,6 +1220,7 @@ registerTerminalIpc();
 registerAgentIpc();
 
 void app.whenReady().then(() => {
+  electronSession.defaultSession.setPermissionRequestHandler(denyPermissionRequest);
   protocol.handle("ralphy-media", async (request) => {
     try {
       const operation = mediaState.captureActive();

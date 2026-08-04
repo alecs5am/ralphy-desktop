@@ -41,7 +41,7 @@ describe("browser agent bridge", () => {
       "result",
     ]);
     expect(events.every((event) => (
-      event.rootPath === "/Users/demo/ralphy-project/.ralphy"
+      event.storeId === "mock-store"
       && event.chatId === "chat-codex"
       && event.provider === "codex"
     ))).toBe(true);
