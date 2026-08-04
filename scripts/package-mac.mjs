@@ -7,8 +7,10 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { sha256File, validateCoreSource } from "./bundled-core.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const electronApp = join(root, "node_modules/electron/dist/Electron.app");
@@ -16,6 +18,16 @@ const output = join(root, "release/Ralphy Media.app");
 const contents = join(output, "Contents");
 const resources = join(contents, "Resources");
 const application = join(resources, "app");
+const coreSource = process.env.RALPHY_CORE_BIN;
+
+if (!coreSource || !isAbsolute(coreSource)) {
+  throw new Error("RALPHY_CORE_BIN must be an absolute path");
+}
+await validateCoreSource(coreSource);
+const coreVersion = execFileSync(coreSource, ["--version"], {
+  encoding: "utf8",
+}).trim();
+if (!coreVersion) throw new Error("RALPHY_CORE_BIN --version returned no version");
 
 await rm(output, { recursive: true, force: true });
 await mkdir(dirname(output), { recursive: true });
@@ -51,6 +63,18 @@ await cp(join(root, "build/RalphyMedia.icns"), join(resources, "RalphyMedia.icns
 await cp(
   join(root, "build/RalphyMedia.iconset/icon_128x128.png"),
   join(resources, "RalphyMedia-drag.png"),
+);
+const bundledCore = join(resources, "bin/ralphy");
+await mkdir(dirname(bundledCore), { recursive: true });
+await cp(coreSource, bundledCore);
+await chmod(bundledCore, 0o755);
+await writeFile(
+  join(resources, "ralphy-core.json"),
+  `${JSON.stringify({
+    version: coreVersion,
+    sha256: await sha256File(bundledCore),
+  }, null, 2)}\n`,
+  { mode: 0o600 },
 );
 
 const plist = join(contents, "Info.plist");

@@ -15,6 +15,7 @@
     "build": "bun run build:renderer && bun run build:electron",
     "benchmark": "bun scripts/benchmark-media.ts",
     "smoke": "bun run build && bun run pty:prepare && node scripts/smoke-electron.mjs",
+    "smoke:packaged": "RALPHY_PACKAGED_APP='release/Ralphy Media.app' node scripts/smoke-electron.mjs",
     "icon:mac": "zsh scripts/build-mac-icon.sh",
     "package:mac": "bun run build && bun run pty:prepare && bun run icon:mac && node scripts/package-mac.mjs",
     "pty:prepare": "node scripts/prepare-node-pty.mjs",
