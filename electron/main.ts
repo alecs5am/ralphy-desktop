@@ -92,6 +92,7 @@ import {
   stopMediaRuntime,
 } from "./media/session";
 import { TerminalManager } from "./terminal/manager";
+import { resolveRalphyExecutable } from "./ralphy/executable";
 import { RalphySession } from "./ralphy/session";
 import { openRootSession, type RootIdentity } from "./root-session";
 import {
@@ -128,7 +129,12 @@ let openRouterCredentialStore: EncryptedCredentialStore | null = null;
 let activeAgentSession: { stop(): void } | null = null;
 let agentTurnBusy = false;
 let cachedOpenRouterModels: { at: number; models: AgentProviderStatus["models"] } | null = null;
-const ralphySession = new RalphySession();
+const ralphyBin = resolveRalphyExecutable({
+  isPackaged: app.isPackaged,
+  resourcesPath: process.resourcesPath,
+  env: process.env,
+});
+const ralphySession = new RalphySession(ralphyBin ? { bin: ralphyBin } : {});
 let migrationRecovery: MainMigrationRecovery | null = null;
 
 function fileDragIcon(): Electron.NativeImage {
