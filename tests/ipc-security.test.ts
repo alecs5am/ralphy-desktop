@@ -47,6 +47,30 @@ describe("Electron IPC security", () => {
     )).toBe(false);
   });
 
+  test("applies the exact renderer predicate to navigations and redirects", async () => {
+    const security = await import("../electron/ipc-security").catch(() => ({}));
+    expect(security).toHaveProperty("installNavigationGuards");
+    const listeners = new Map<string, (event: { preventDefault(): void }, url: string) => void>();
+    const webContents = {
+      on(event: string, listener: (event: { preventDefault(): void }, url: string) => void) {
+        listeners.set(event, listener);
+      },
+    };
+    (security as {
+      installNavigationGuards(contents: typeof webContents, rendererUrl: string): void;
+    }).installNavigationGuards(webContents, "https://app.ralphy.test/workspace");
+
+    expect([...listeners.keys()]).toEqual(["will-navigate", "will-redirect"]);
+    for (const eventName of ["will-navigate", "will-redirect"]) {
+      const preventDefault = vi.fn();
+      listeners.get(eventName)?.(
+        { preventDefault },
+        "https://attacker.example/workspace",
+      );
+      expect(preventDefault).toHaveBeenCalledOnce();
+    }
+  });
+
   test("accepts only the active main frame and denies permissions", async () => {
     const security = await import("../electron/ipc-security");
     const mainFrame = {};
@@ -91,6 +115,8 @@ describe("Electron IPC security", () => {
   test("preload exposes an explicit method allowlist", async () => {
     vi.resetModules();
     let exposed: unknown;
+    const invoke = vi.fn(async () => ({ ok: true, value: undefined }));
+    const send = vi.fn();
     vi.doMock("electron", () => ({
       contextBridge: {
         exposeInMainWorld(_name: string, value: unknown) {
@@ -98,8 +124,8 @@ describe("Electron IPC security", () => {
         },
       },
       ipcRenderer: {
-        invoke: vi.fn(async () => ({ ok: true, value: null })),
-        send: vi.fn(),
+        invoke,
+        send,
         on: vi.fn(),
         removeListener: vi.fn(),
       },
@@ -116,6 +142,20 @@ describe("Electron IPC security", () => {
       "sendAgentMessage",
       "createTerminal",
     ]));
+    const bridge = exposed as {
+      startFileDrag(path: string): Promise<void>;
+      writeTerminal(sessionId: string, data: string): Promise<void>;
+      resizeTerminal(sessionId: string, dimensions: { cols: number; rows: number }): Promise<void>;
+    };
+    await bridge.startFileDrag("/library/video.mp4");
+    await bridge.writeTerminal("terminal-1", "ls\n");
+    await bridge.resizeTerminal("terminal-1", { cols: 80, rows: 24 });
+    expect(invoke.mock.calls).toEqual(expect.arrayContaining([
+      ["media:files:drag", "/library/video.mp4"],
+      ["terminal:write", "terminal-1", "ls\n"],
+      ["terminal:resize", "terminal-1", { cols: 80, rows: 24 }],
+    ]));
+    expect(send).not.toHaveBeenCalled();
   });
 
   test("never enables renderer mocks in production without an explicit flag", async () => {

@@ -69,9 +69,11 @@ export class TerminalController {
       }),
     );
     this.#disposables.push(
-      this.terminal.onData((data) => bridge.writeTerminal(session.id, data)),
+      this.terminal.onData((data) => {
+        void bridge.writeTerminal(session.id, data).catch(() => undefined);
+      }),
       this.terminal.onResize((dimensions) => {
-        bridge.resizeTerminal(session.id, dimensions);
+        void bridge.resizeTerminal(session.id, dimensions).catch(() => undefined);
       }),
       this.terminal.onTitleChange(onTitleChange),
     );

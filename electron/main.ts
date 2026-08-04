@@ -103,7 +103,7 @@ import {
 import {
   assertTrustedSender as assertIpcSender,
   denyPermissionRequest,
-  isTrustedNavigation,
+  installNavigationGuards,
   secureWebPreferences,
   toIpcResult,
 } from "./ipc-security";
@@ -643,6 +643,29 @@ function createWatcher(rootPath: string): LibraryWatcher {
   });
 }
 
+async function prepareMediaRoot(root: string): Promise<CatalogResult> {
+  const operation = mediaState.beginOpen();
+  worker?.cancelProject();
+  try {
+    const catalog = await refreshCatalog(operation, root, false);
+    mediaState.assertOpen(operation);
+    const active = await watcher.replace({
+      assertCurrent: () => mediaState.assertOpen(operation),
+      create: () => createWatcher(root),
+      prepare: () => writeSettings(
+        { lastLibrary: root },
+        () => mediaState.assertOpen(operation),
+      ),
+      commit: () => mediaState.completeOpen(operation, root),
+    });
+    mediaState.assertActive(active);
+    return catalog;
+  } catch (error) {
+    mediaState.abortOpen(operation);
+    throw error;
+  }
+}
+
 async function openLibrary(
   rootPath: string,
 ): Promise<LibraryOpenResult> {
@@ -657,27 +680,18 @@ async function openLibrary(
       session: ralphySession,
       root,
       label: basename(dirname(root)) || ".ralphy",
-      prepare: async () => {
-        const operation = mediaState.beginOpen();
-        worker?.cancelProject();
-        try {
-          const nextCatalog = await refreshCatalog(operation, root, false);
-          mediaState.assertOpen(operation);
-          const active = await watcher.replace({
-            assertCurrent: () => mediaState.assertOpen(operation),
-            create: () => createWatcher(root),
-            prepare: () => writeSettings(
-              { lastLibrary: root },
-              () => mediaState.assertOpen(operation),
-            ),
-            commit: () => mediaState.completeOpen(operation, root),
-          });
-          mediaState.assertActive(active);
-          catalog = nextCatalog;
-        } catch (error) {
-          mediaState.abortOpen(operation);
-          throw error;
-        }
+      prepare: async (previousRoot) => {
+        catalog = await prepareMediaRoot(root);
+        return async () => {
+          if (previousRoot) {
+            await prepareMediaRoot(previousRoot);
+            return;
+          }
+          mediaState.close();
+          watcher.close();
+          worker?.cancelProject();
+          await writeSettings({ lastLibrary: null }, () => undefined);
+        };
       },
       invalidateFileTokens: () => mediaState.fileAccess.clear(),
       stopAgentTurns: () => activeAgentSession?.stop(),
@@ -987,27 +1001,18 @@ function registerMediaIpc(): void {
       (resolvedPath) => shell.openPath(resolvedPath),
     );
   });
-  ipcMain.on(MEDIA_CHANNELS.startFileDrag, (event, rawPath: unknown) => {
-    try {
-      assertTrustedSender(event);
-      const operation = mediaState.captureActive();
-      const path = parseString(rawPath, "drag path");
-      const resolvedPath = mediaState.fileAccess.resolveFileForDrag(
-        operation.rootPath,
-        path,
-      );
-      mediaState.assertActive(operation);
-      event.sender.startDrag({
-        file: resolvedPath,
-        icon: fileDragIcon(),
-      });
-    } catch (error) {
-      emitMedia({
-        type: "error",
-        operation: "drag-file",
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
+  securedHandle(MEDIA_CHANNELS.startFileDrag, (event, rawPath: unknown) => {
+    const operation = mediaState.captureActive();
+    const path = parseString(rawPath, "drag path");
+    const resolvedPath = mediaState.fileAccess.resolveFileForDrag(
+      operation.rootPath,
+      path,
+    );
+    mediaState.assertActive(operation);
+    event.sender.startDrag({
+      file: resolvedPath,
+      icon: fileDragIcon(),
+    });
   });
   securedHandle(MEDIA_CHANNELS.copyText, (_event, rawText: unknown) => {
     const text = parseString(rawText, "clipboard text", CLIPBOARD_LIMIT);
@@ -1058,32 +1063,22 @@ function registerTerminalIpc(): void {
       throw error;
     }
   });
-  ipcMain.on(
+  securedHandle(
     TERMINAL_CHANNELS.write,
-    (event, rawSessionId: unknown, rawData: unknown) => {
-      try {
-        assertTrustedSender(event);
-        terminalManager.write(
-          parseString(rawSessionId, "terminal session id", 128),
-          parseString(rawData, "terminal input", 64 * 1024),
-        );
-      } catch {
-        // Invalid fire-and-forget terminal input is ignored at the trust boundary.
-      }
+    (_event, rawSessionId: unknown, rawData: unknown) => {
+      terminalManager.write(
+        parseString(rawSessionId, "terminal session id", 128),
+        parseString(rawData, "terminal input", 64 * 1024),
+      );
     },
   );
-  ipcMain.on(
+  securedHandle(
     TERMINAL_CHANNELS.resize,
-    (event, rawSessionId: unknown, rawDimensions: unknown) => {
-      try {
-        assertTrustedSender(event);
-        terminalManager.resize(
-          parseString(rawSessionId, "terminal session id", 128),
-          parseTerminalDimensions(rawDimensions),
-        );
-      } catch {
-        // Stale resize events are expected while panes are being removed.
-      }
+    (_event, rawSessionId: unknown, rawDimensions: unknown) => {
+      terminalManager.resize(
+        parseString(rawSessionId, "terminal session id", 128),
+        parseTerminalDimensions(rawDimensions),
+      );
     },
   );
   securedHandle(TERMINAL_CHANNELS.kill, (event, rawSessionId: unknown) => {
@@ -1132,9 +1127,7 @@ function createWindow(): void {
     }
     return { action: "deny" };
   });
-  createdWindow.webContents.on("will-navigate", (event, url) => {
-    if (!isTrustedNavigation(url, rendererUrl)) event.preventDefault();
-  });
+  installNavigationGuards(createdWindow.webContents, rendererUrl);
   createdWindow.webContents.on("before-input-event", (event, input) => {
     const command = input.meta && !input.alt && !input.control && !input.shift;
     if (

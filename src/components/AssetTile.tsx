@@ -196,7 +196,7 @@ export function AssetTile({
         title={item.projectRelativePath}
         onDragStartCapture={(event) => {
           event.preventDefault();
-          bridge.startFileDrag(item.absolutePath);
+          void bridge.startFileDrag(item.absolutePath).catch(() => undefined);
         }}
         onContextMenu={(event) => {
           event.preventDefault();

@@ -63,6 +63,28 @@ export function isTrustedNavigation(target: string, renderer: string): boolean {
   }
 }
 
+interface NavigationEvent {
+  preventDefault(): void;
+}
+
+interface NavigationWebContents {
+  on(
+    event: "will-navigate" | "will-redirect",
+    listener: (event: NavigationEvent, url: string) => void,
+  ): unknown;
+}
+
+export function installNavigationGuards(
+  webContents: NavigationWebContents,
+  rendererUrl: string,
+): void {
+  const guard = (event: NavigationEvent, url: string): void => {
+    if (!isTrustedNavigation(url, rendererUrl)) event.preventDefault();
+  };
+  webContents.on("will-navigate", guard);
+  webContents.on("will-redirect", guard);
+}
+
 export function denyPermissionRequest(
   _webContents: unknown,
   _permission: string,

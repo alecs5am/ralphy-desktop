@@ -306,14 +306,14 @@ export interface MediaWorkbenchBridge {
   trashItems(paths: string[]): Promise<TrashResult>;
   showInFinder(path: string): Promise<void>;
   openExternal(path: string): Promise<string>;
-  startFileDrag(path: string): void;
+  startFileDrag(path: string): Promise<void>;
   copyText(text: string): Promise<void>;
   copyMigrationRecoveryCommand(): Promise<void>;
   readText(path: string, maxBytes?: number): Promise<TextReadResult>;
   getMediaUrl(path: string): Promise<MediaPreviewSource>;
   createTerminal(dimensions: TerminalDimensions): Promise<TerminalSession>;
-  writeTerminal(sessionId: string, data: string): void;
-  resizeTerminal(sessionId: string, dimensions: TerminalDimensions): void;
+  writeTerminal(sessionId: string, data: string): Promise<void>;
+  resizeTerminal(sessionId: string, dimensions: TerminalDimensions): Promise<void>;
   killTerminal(sessionId: string): Promise<void>;
   onTerminalEvent(callback: (event: TerminalEvent) => void): () => void;
   getAgentProviders(): Promise<AgentProviderStatus[]>;

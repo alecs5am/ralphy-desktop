@@ -42,18 +42,16 @@ const mediaBridge: MediaWorkbenchBridge = {
   trashItems: (paths) => invoke(MEDIA_CHANNELS.trashItems, paths),
   showInFinder: (path) => invoke(MEDIA_CHANNELS.showInFinder, path),
   openExternal: (path) => invoke(MEDIA_CHANNELS.openExternal, path),
-  startFileDrag: (path) => ipcRenderer.send(MEDIA_CHANNELS.startFileDrag, path),
+  startFileDrag: (path) => invoke(MEDIA_CHANNELS.startFileDrag, path),
   copyText: (text) => invoke(MEDIA_CHANNELS.copyText, text),
   copyMigrationRecoveryCommand: () => invoke(MEDIA_CHANNELS.copyMigrationRecoveryCommand),
   readText: (path, maxBytes) => invoke(MEDIA_CHANNELS.readText, path, maxBytes),
   getMediaUrl: (path) => invoke(MEDIA_CHANNELS.getMediaUrl, path),
   createTerminal: (dimensions) => invoke(TERMINAL_CHANNELS.create, dimensions),
-  writeTerminal: (sessionId, data) => {
-    ipcRenderer.send(TERMINAL_CHANNELS.write, sessionId, data);
-  },
-  resizeTerminal: (sessionId, dimensions) => {
-    ipcRenderer.send(TERMINAL_CHANNELS.resize, sessionId, dimensions);
-  },
+  writeTerminal: (sessionId, data) => invoke(TERMINAL_CHANNELS.write, sessionId, data),
+  resizeTerminal: (sessionId, dimensions) => (
+    invoke(TERMINAL_CHANNELS.resize, sessionId, dimensions)
+  ),
   killTerminal: (sessionId) => invoke(TERMINAL_CHANNELS.kill, sessionId),
   onTerminalEvent(callback: (event: TerminalEvent) => void) {
     const listener = (_event: Electron.IpcRendererEvent, payload: TerminalEvent): void => {

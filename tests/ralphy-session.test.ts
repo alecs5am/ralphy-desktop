@@ -159,6 +159,53 @@ describe("RalphySession", () => {
     await session.close();
   });
 
+  test("rolls back preparation when a newer root starts before commit", async () => {
+    const session = new RalphySession({ bin: fixtureBin });
+    await session.open("/libraries/current");
+    let releasePreparation!: () => void;
+    const preparationBlocked = new Promise<void>((resolve) => {
+      releasePreparation = resolve;
+    });
+    let preparationStarted!: () => void;
+    const preparationEntered = new Promise<void>((resolve) => {
+      preparationStarted = resolve;
+    });
+    const events: string[] = [];
+
+    const stale = session.open("/libraries/next", {
+      async preparePreviousClose(previousRoot) {
+        events.push(`prepare:${previousRoot}`);
+        preparationStarted();
+        await preparationBlocked;
+        return () => events.push(`rollback:${previousRoot}`);
+      },
+      beforePreviousClose(previousRoot) {
+        events.push(`cleanup:${previousRoot}`);
+      },
+    });
+    await preparationEntered;
+    const latest = session.open("/libraries/fast", {
+      preparePreviousClose(previousRoot) {
+        events.push(`latest-prepare:${previousRoot}`);
+      },
+      beforePreviousClose(previousRoot) {
+        events.push(`latest-cleanup:${previousRoot}`);
+      },
+    });
+    releasePreparation();
+
+    await expect(stale).rejects.toMatchObject({ code: "E_BRIDGE_SUPERSEDED" });
+    await expect(latest).resolves.toMatchObject({ rootId: "fast" });
+    expect(events).toEqual([
+      "prepare:/libraries/current",
+      "rollback:/libraries/current",
+      "latest-prepare:/libraries/current",
+      "latest-cleanup:/libraries/current",
+    ]);
+    expect(session.root).toBe("/libraries/fast");
+    await session.close();
+  });
+
   test("cancels a superseded candidate that never completes hello", async () => {
     const session = new RalphySession({ bin: fixtureBin });
     const stale = session.open("/libraries/never").then(

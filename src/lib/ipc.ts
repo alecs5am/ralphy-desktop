@@ -352,7 +352,7 @@ function createMockBridge(): RalphyBridge {
     async openExternal() {
       return "";
     },
-    startFileDrag() {},
+    async startFileDrag() {},
     async copyText() {},
     async copyMigrationRecoveryCommand() {},
     async readText(path, maxBytes = 256 * 1024) {
@@ -394,12 +394,12 @@ function createMockBridge(): RalphyBridge {
       void dimensions;
       return session;
     },
-    writeTerminal(sessionId, data) {
+    async writeTerminal(sessionId, data) {
       for (const callback of terminalCallbacks) {
         callback({ type: "data", sessionId, data });
       }
     },
-    resizeTerminal() {},
+    async resizeTerminal() {},
     async killTerminal(sessionId) {
       for (const callback of terminalCallbacks) {
         callback({ type: "exit", sessionId, exitCode: 0, signal: 0 });

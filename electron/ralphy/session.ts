@@ -10,9 +10,14 @@ export interface RalphySessionOptions {
 }
 
 export interface RalphySessionOpenHooks {
-  beforePreviousClose?(): void | Promise<void>;
-  afterPreviousClose?(): void | Promise<void>;
+  preparePreviousClose?(
+    previousRoot: string | null,
+  ): void | RalphyPreparationRollback | Promise<void | RalphyPreparationRollback>;
+  beforePreviousClose?(previousRoot: string | null): void;
+  afterPreviousClose?(previousRoot: string | null): void | Promise<void>;
 }
+
+export type RalphyPreparationRollback = () => void | Promise<void>;
 
 interface ActiveSession {
   root: string;
@@ -100,16 +105,35 @@ export class RalphySession {
         throw this.#supersededError();
       }
       const previous = this.#active;
+      let rollback: RalphyPreparationRollback | void;
       try {
-        await hooks.beforePreviousClose?.();
+        rollback = await hooks.preparePreviousClose?.(previous?.root ?? null);
       } catch (error) {
         await candidate.close();
+        throw error;
+      }
+      if (generation !== this.#generation) {
+        try {
+          await rollback?.();
+        } finally {
+          await candidate.close();
+        }
+        throw this.#supersededError();
+      }
+      try {
+        hooks.beforePreviousClose?.(previous?.root ?? null);
+      } catch (error) {
+        try {
+          await rollback?.();
+        } finally {
+          await candidate.close();
+        }
         throw error;
       }
       this.#active = { root, client: candidate, hello };
       this.#rootEpoch += 1;
       await previous?.client.close();
-      await hooks.afterPreviousClose?.();
+      await hooks.afterPreviousClose?.(previous?.root ?? null);
       return hello;
     });
   }
