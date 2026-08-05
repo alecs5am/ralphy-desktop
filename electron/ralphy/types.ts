@@ -406,6 +406,20 @@ export interface ProjectOverviewDto { project: ProjectDto; sections: JsonObject 
 export interface LocatorDto { absolutePath: string; mime: string | null; bytes: number }
 export interface MigrationDto { runId: string; state: string; issues: number }
 
+export interface MigrationSecretImportParams {
+  runId: string;
+  sourceEntryId: string;
+  ref: string;
+  kind: "text";
+  value: string;
+}
+
+export interface MigrationSecretImportResult {
+  ref: string;
+  kind: "text";
+  completed: true;
+}
+
 type EmptyParams = Record<string, never>;
 type ScopedParams = { context: BridgeContext };
 type CursorParams = { after?: string | null; limit?: number };
@@ -584,7 +598,7 @@ export interface BridgeMethodContract {
   "agent.turn.resume": Contract<ScopedParams & ExternalOperationParams & { turnId: string; prompt: string; chatId?: string }, AgentTurnDto>;
   "agent.turn.status": Contract<ScopedParams & { turnId: string } & CursorParams, { turn: AgentTurnDto; events: Page<AgentTurnEventDto> }>;
   "agent.turn.stop": Contract<ScopedParams & { turnId: string; expectedState: string }, AgentTurnDto>;
-  "migration.secret.import": Contract<{ source: "desktop"; payload: JsonObject }, MigrationDto>;
+  "migration.secret.import": Contract<MigrationSecretImportParams, MigrationSecretImportResult>;
   "migration.desktop.import": Contract<{ payload: JsonObject; idempotencyKey: string }, MigrationDto>;
   "migration.consumer.map": Contract<{
     migrationRunId: string;

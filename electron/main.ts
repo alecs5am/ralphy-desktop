@@ -92,6 +92,14 @@ import {
   stopMediaRuntime,
 } from "./media/session";
 import { TerminalManager } from "./terminal/manager";
+import {
+  assertCanonicalStagedRoot,
+  dispatchDesktopStartup,
+  readSecretHandoffRequest,
+  runSecretHandoff,
+  secretFileForProvider,
+} from "./migration/secret-handoff";
+import { RalphyBridgeClient } from "./ralphy/client";
 import { resolveRalphyExecutable } from "./ralphy/executable";
 import { RalphySession } from "./ralphy/session";
 import { openRootSession, type RootIdentity } from "./root-session";
@@ -134,7 +142,7 @@ const ralphyBin = resolveRalphyExecutable({
   resourcesPath: process.resourcesPath,
   env: process.env,
 });
-const ralphySession = new RalphySession(ralphyBin ? { bin: ralphyBin } : {});
+let ralphySession: RalphySession;
 let migrationRecovery: MainMigrationRecovery | null = null;
 
 function fileDragIcon(): Electron.NativeImage {
@@ -152,17 +160,6 @@ function fileDragIcon(): Electron.NativeImage {
   }
   throw new Error("Native drag icon is unavailable");
 }
-
-protocol.registerSchemesAsPrivileged([{
-  scheme: "ralphy-media",
-  privileges: {
-    standard: true,
-    secure: true,
-    supportFetchAPI: true,
-    corsEnabled: true,
-    stream: true,
-  },
-}]);
 
 interface PendingWorkerRequest {
   resolve: (value: CatalogResult | ProjectScanResult) => void;
@@ -255,12 +252,9 @@ class MediaWorkerClient {
 let win: BrowserWindow | null = null;
 let worker: MediaWorkerClient | null = null;
 const mediaState = new MediaSessionState();
-const watcher = new ActiveRootResource<LibraryWatcher>();
+let watcher: ActiveRootResource<LibraryWatcher>;
 const restoreLibrary = createSingleFlight<LibraryOpenResult | null>();
-const terminalManager = new TerminalManager({
-  spawn: (file, args, options) => nodePty.spawn(file, args, options),
-  emit: (event) => sendIfWindowAlive(win, TERMINAL_CHANNELS.event, event),
-});
+let terminalManager: TerminalManager;
 
 function credentialStore(): ClaudeCredentialStore {
   if (!claudeCredentialStore) {
@@ -1214,83 +1208,132 @@ function stopBackgroundResources(): void {
   worker = null;
 }
 
-registerMediaIpc();
-registerTerminalIpc();
-registerAgentIpc();
-
-void app.whenReady().then(() => {
-  electronSession.defaultSession.setPermissionRequestHandler(denyPermissionRequest);
-  protocol.handle("ralphy-media", async (request) => {
+function startSecretHandoff(): void {
+  void app.whenReady().then(async () => {
     try {
-      const operation = mediaState.captureActive();
-      const assertCurrent = (): void => mediaState.assertActive(operation);
-      const url = new URL(request.url);
-      if (url.hostname !== "asset") return new Response("Not found", { status: 404 });
-      const token = url.pathname.slice(1);
-      const safePath = await mediaState.fileAccess.resolve(
-        operation.rootPath,
-        token,
-        assertCurrent,
-      );
-      assertCurrent();
-      const info = await stat(safePath);
-      assertCurrent();
-      if (
-        url.searchParams.get("purpose") === "waveform"
-        && info.size > MAX_WAVEFORM_DECODE_BYTES
-      ) {
-        return new Response("Waveform source exceeds the decode limit", {
-          status: 413,
-        });
-      }
-      const requestedRange = request.headers.get("range");
-      const range = resolveMediaByteRange(requestedRange, info.size);
-      if (requestedRange !== null && range === null) {
-        return new Response(null, {
-          status: 416,
-          headers: {
-            "Accept-Ranges": "bytes",
-            "Content-Range": `bytes */${info.size}`,
-          },
-        });
-      }
-      const response = await net.fetch(pathToFileURL(safePath).toString(), {
-        headers: range
-          ? { Range: `bytes=${range.start}-${range.end}` }
-          : undefined,
+      const userData = app.getPath("userData");
+      const request = await readSecretHandoffRequest(process.stdin);
+      await runSecretHandoff(request, {
+        stores: {
+          anthropic: new ClaudeCredentialStore({
+            path: join(userData, secretFileForProvider("anthropic")),
+            cipher: safeStorage,
+          }),
+          openrouter: new EncryptedCredentialStore({
+            path: join(userData, secretFileForProvider("openrouter")),
+            cipher: safeStorage,
+            validate: validateOpenRouterApiKey,
+          }),
+        },
+        createBridge: (root) => new RalphyBridgeClient(
+          ralphyBin ? { bin: ralphyBin, root } : { root },
+        ),
+        validateRoot: assertCanonicalStagedRoot,
       });
-      assertCurrent();
-      const headers = new Headers(response.headers);
-      headers.set("Accept-Ranges", "bytes");
-      headers.set(
-        "Content-Length",
-        String(range ? range.end - range.start + 1 : info.size),
-      );
-      if (range) {
-        headers.set(
-          "Content-Range",
-          `bytes ${range.start}-${range.end}/${info.size}`,
-        );
-      }
-      return new Response(response.body, {
-        status: range ? 206 : response.status,
-        statusText: range ? "Partial Content" : response.statusText,
-        headers,
-      });
+      app.exit(0);
     } catch {
-      return new Response("Forbidden", { status: 403 });
+      app.exit(1);
     }
   });
-  createWindow();
-});
+}
 
-app.on("window-all-closed", () => {
-  stopBackgroundResources();
-  if (process.platform !== "darwin") app.quit();
-});
-app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
-});
-app.on("before-quit", () => {
-  stopBackgroundResources();
-});
+function startNormalDesktop(): void {
+  ralphySession = new RalphySession(ralphyBin ? { bin: ralphyBin } : {});
+  watcher = new ActiveRootResource<LibraryWatcher>();
+  terminalManager = new TerminalManager({
+    spawn: (file, args, options) => nodePty.spawn(file, args, options),
+    emit: (event) => sendIfWindowAlive(win, TERMINAL_CHANNELS.event, event),
+  });
+  protocol.registerSchemesAsPrivileged([{
+    scheme: "ralphy-media",
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  }]);
+  registerMediaIpc();
+  registerTerminalIpc();
+  registerAgentIpc();
+
+  void app.whenReady().then(() => {
+    electronSession.defaultSession.setPermissionRequestHandler(denyPermissionRequest);
+    protocol.handle("ralphy-media", async (request) => {
+      try {
+        const operation = mediaState.captureActive();
+        const assertCurrent = (): void => mediaState.assertActive(operation);
+        const url = new URL(request.url);
+        if (url.hostname !== "asset") return new Response("Not found", { status: 404 });
+        const token = url.pathname.slice(1);
+        const safePath = await mediaState.fileAccess.resolve(
+          operation.rootPath,
+          token,
+          assertCurrent,
+        );
+        assertCurrent();
+        const info = await stat(safePath);
+        assertCurrent();
+        if (
+          url.searchParams.get("purpose") === "waveform"
+          && info.size > MAX_WAVEFORM_DECODE_BYTES
+        ) {
+          return new Response("Waveform source exceeds the decode limit", {
+            status: 413,
+          });
+        }
+        const requestedRange = request.headers.get("range");
+        const range = resolveMediaByteRange(requestedRange, info.size);
+        if (requestedRange !== null && range === null) {
+          return new Response(null, {
+            status: 416,
+            headers: {
+              "Accept-Ranges": "bytes",
+              "Content-Range": `bytes */${info.size}`,
+            },
+          });
+        }
+        const response = await net.fetch(pathToFileURL(safePath).toString(), {
+          headers: range
+            ? { Range: `bytes=${range.start}-${range.end}` }
+            : undefined,
+        });
+        assertCurrent();
+        const headers = new Headers(response.headers);
+        headers.set("Accept-Ranges", "bytes");
+        headers.set(
+          "Content-Length",
+          String(range ? range.end - range.start + 1 : info.size),
+        );
+        if (range) {
+          headers.set(
+            "Content-Range",
+            `bytes ${range.start}-${range.end}/${info.size}`,
+          );
+        }
+        return new Response(response.body, {
+          status: range ? 206 : response.status,
+          statusText: range ? "Partial Content" : response.statusText,
+          headers,
+        });
+      } catch {
+        return new Response("Forbidden", { status: 403 });
+      }
+    });
+    createWindow();
+  });
+
+  app.on("window-all-closed", () => {
+    stopBackgroundResources();
+    if (process.platform !== "darwin") app.quit();
+  });
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+  app.on("before-quit", () => {
+    stopBackgroundResources();
+  });
+}
+
+dispatchDesktopStartup(process.argv, startSecretHandoff, startNormalDesktop);
