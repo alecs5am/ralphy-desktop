@@ -13,28 +13,23 @@ export const SECRET_HANDOFF_REQUEST_MAX_BYTES = 16 * 1024;
 export const SECRET_HANDOFF_FLAG = "--migration-secret-handoff";
 
 const REQUEST_FIELDS = [
-  "v", "runId", "root", "rootId", "rootDevice", "rootInode",
-  "maintenanceNonce", "sourceEntryId", "ref", "provider",
+  "v", "authorizationNonce", "runId", "stagedRoot", "sourceEntryId", "ref", "kind",
 ] as const;
 const RUN_ID = /^mig_[A-Za-z0-9][A-Za-z0-9-]{0,123}$/;
 const SOURCE_ENTRY_ID = /^mentry_[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/;
 const WORKSPACE_ID = /^ws_[A-Za-z0-9][A-Za-z0-9._:-]{0,123}$/;
-const SHA256_HEX = /^[a-f0-9]{64}$/;
-const MAINTENANCE_NONCE = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
+const AUTHORIZATION_NONCE = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
 
 export type SecretHandoffProvider = "anthropic" | "openrouter";
 
 export interface SecretHandoffRequest {
   v: 1;
+  authorizationNonce: string;
   runId: string;
-  root: string;
-  rootId: string;
-  rootDevice: number;
-  rootInode: number;
-  maintenanceNonce: string;
+  stagedRoot: string;
   sourceEntryId: string;
   ref: string;
-  provider: SecretHandoffProvider;
+  kind: "text";
 }
 
 export interface SecretHandoffBridge {
@@ -54,7 +49,8 @@ interface SecretHandoffDependencies {
   stores: Record<SecretHandoffProvider, SecretHandoffCredentialStore>;
   createBridge(root: string): SecretHandoffBridge;
   captureRoot(root: string): Promise<SecretHandoffRootIdentity>;
-  authorizeMaintenance(request: SecretHandoffRequest): Promise<void>;
+  sourcePath: string;
+  encryptedSourcePath: string;
 }
 
 export interface SecretHandoffRootIdentity {
@@ -73,36 +69,36 @@ export function parseSecretHandoffRequest(raw: string): SecretHandoffRequest {
   if (!raw || Buffer.byteLength(raw) > SECRET_HANDOFF_REQUEST_MAX_BYTES) {
     throw new Error("Invalid secret handoff request size");
   }
-  const parsed: unknown = JSON.parse(raw);
+  if (!raw.endsWith("\n") || raw.includes("\r") || raw.indexOf("\n") !== raw.length - 1) {
+    throw new Error("Invalid secret handoff request frame");
+  }
+  const body = raw.slice(0, -1);
+  const parsed: unknown = JSON.parse(body);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Invalid secret handoff request");
   }
   const value = parsed as Record<string, unknown>;
   const keys = Object.keys(value);
-  if (keys.length !== REQUEST_FIELDS.length || !REQUEST_FIELDS.every((key) => Object.hasOwn(value, key))) {
+  if (JSON.stringify(keys) !== JSON.stringify(REQUEST_FIELDS)) {
     throw new Error("Invalid secret handoff request fields");
   }
-  const provider = value.provider;
-  secretFileForProvider(provider);
   if (
     value.v !== 1
+    || typeof value.authorizationNonce !== "string"
+    || !AUTHORIZATION_NONCE.test(value.authorizationNonce)
     || typeof value.runId !== "string"
     || !RUN_ID.test(value.runId)
-    || typeof value.root !== "string"
-    || !validStagedRoot(value.root, value.runId)
-    || typeof value.rootId !== "string"
-    || !SHA256_HEX.test(value.rootId)
-    || !safeFilesystemInteger(value.rootDevice)
-    || !safeFilesystemInteger(value.rootInode)
-    || typeof value.maintenanceNonce !== "string"
-    || !MAINTENANCE_NONCE.test(value.maintenanceNonce)
+    || typeof value.stagedRoot !== "string"
+    || !validStagedRoot(value.stagedRoot, value.runId)
     || typeof value.sourceEntryId !== "string"
     || !SOURCE_ENTRY_ID.test(value.sourceEntryId)
     || typeof value.ref !== "string"
-    || !validProviderRef(value.ref, provider)
+    || !secretProviderFromRef(value.ref)
+    || value.kind !== "text"
   ) {
     throw new Error("Invalid secret handoff request");
   }
+  if (JSON.stringify(value) !== body) throw new Error("Invalid secret handoff request encoding");
   return value as unknown as SecretHandoffRequest;
 }
 
@@ -128,26 +124,30 @@ export async function runSecretHandoff(
   request: SecretHandoffRequest,
   dependencies: SecretHandoffDependencies,
 ): Promise<void> {
-  await dependencies.authorizeMaintenance(request);
-  await assertExpectedRootIdentity(request, dependencies.captureRoot);
-  let secret = await dependencies.stores[request.provider].read();
+  const provider = secretProviderFromRef(request.ref);
+  if (!provider) throw new Error("Unsupported secret handoff provider");
+  const rootIdentity = await dependencies.captureRoot(request.stagedRoot);
+  let secret = await dependencies.stores[provider].read();
   if (!secret) throw new Error("Desktop credential is unavailable");
   let bridge: SecretHandoffBridge | null = null;
   try {
-    await assertExpectedRootIdentity(request, dependencies.captureRoot);
-    bridge = dependencies.createBridge(request.root);
+    await assertExpectedRootIdentity(request.stagedRoot, rootIdentity, dependencies.captureRoot);
+    bridge = dependencies.createBridge(request.stagedRoot);
     const hello = await bridge.start();
-    if (hello.rootId !== request.rootId) throw new Error("Bridge root identity mismatch");
-    await assertExpectedRootIdentity(request, dependencies.captureRoot);
-    await assertExpectedRootIdentity(request, dependencies.captureRoot);
+    if (hello.rootId !== rootIdentity.rootId) throw new Error("Bridge root identity mismatch");
+    await assertExpectedRootIdentity(request.stagedRoot, rootIdentity, dependencies.captureRoot);
+    await assertExpectedRootIdentity(request.stagedRoot, rootIdentity, dependencies.captureRoot);
     const result = await bridge.request("migration.secret.import", {
+      sourcePath: dependencies.sourcePath,
+      encryptedSourcePath: dependencies.encryptedSourcePath,
+      authorizationNonce: request.authorizationNonce,
       runId: request.runId,
       sourceEntryId: request.sourceEntryId,
       ref: request.ref,
       kind: "text",
       value: secret,
     });
-    await assertExpectedRootIdentity(request, dependencies.captureRoot);
+    await assertExpectedRootIdentity(request.stagedRoot, rootIdentity, dependencies.captureRoot);
     assertSecretImportResult(result, request.ref);
   } finally {
     secret = null;
@@ -182,10 +182,6 @@ export async function assertCanonicalStagedRoot(root: string): Promise<void> {
   await captureStagedRootIdentity(root);
 }
 
-export async function unboundSecretHandoffAuthorization(): Promise<never> {
-  throw new Error("Task 8 PID and maintenance nonce binding is not installed");
-}
-
 export function dispatchDesktopStartup(
   argv: readonly string[],
   startSecretHandoff: () => void,
@@ -216,19 +212,26 @@ function validProviderRef(ref: string, provider: unknown): boolean {
     && parts[5] === parts[3];
 }
 
+export function secretProviderFromRef(ref: string): SecretHandoffProvider | null {
+  if (validProviderRef(ref, "anthropic")) return "anthropic";
+  if (validProviderRef(ref, "openrouter")) return "openrouter";
+  return null;
+}
+
 function safeFilesystemInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
 async function assertExpectedRootIdentity(
-  request: SecretHandoffRequest,
+  root: string,
+  expected: SecretHandoffRootIdentity,
   capture: (root: string) => Promise<SecretHandoffRootIdentity>,
 ): Promise<void> {
-  const identity = await capture(request.root);
+  const identity = await capture(root);
   if (
-    identity.rootId !== request.rootId
-    || identity.rootDevice !== request.rootDevice
-    || identity.rootInode !== request.rootInode
+    identity.rootId !== expected.rootId
+    || identity.rootDevice !== expected.rootDevice
+    || identity.rootInode !== expected.rootInode
   ) {
     throw new Error("Secret handoff root identity mismatch");
   }

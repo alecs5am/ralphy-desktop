@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -37,17 +37,19 @@ if (packagedApp) {
 const userData = await mkdtemp(join(tmpdir(), "ralphy-media-smoke-"));
 const runId = "mig_11111111-1111-4111-8111-111111111111";
 const workspaceId = "ws_33333333-3333-4333-8333-333333333333";
+const stagedRoot = join(userData, ".ralphy-staging", runId, ".ralphy");
+if (secretHandoffSmoke) {
+  await mkdir(join(userData, ".ralphy"));
+  await mkdir(stagedRoot, { recursive: true });
+}
 const handoffRequest = {
   v: 1,
+  authorizationNonce: "55555555-5555-4555-8555-555555555555",
   runId,
-  root: join(userData, ".ralphy-staging", runId, ".ralphy"),
-  rootId: "0".repeat(64),
-  rootDevice: 0,
-  rootInode: 0,
-  maintenanceNonce: "smoke-only-maintenance-nonce",
+  stagedRoot,
   sourceEntryId: "mentry_22222222-2222-4222-8222-222222222222",
   ref: `provider/anthropic/workspace/${workspaceId}/workspace/${workspaceId}`,
-  provider: "anthropic",
+  kind: "text",
 };
 const child = spawn(
   executable,
@@ -74,7 +76,7 @@ child.stdout.on("data", (chunk) => {
 child.stderr.on("data", (chunk) => {
   stderr += chunk;
 });
-child.stdin.end(secretHandoffSmoke ? JSON.stringify(handoffRequest) : undefined);
+child.stdin.end(secretHandoffSmoke ? `${JSON.stringify(handoffRequest)}\n` : undefined);
 
 const timeout = setTimeout(() => child.kill("SIGTERM"), 15_000);
 const outcome = await new Promise((resolveExit) => child.once(
@@ -85,7 +87,7 @@ clearTimeout(timeout);
 await rm(userData, { recursive: true, force: true });
 
 if (secretHandoffSmoke) {
-  if (outcome.code !== 1 || outcome.signal !== null || stdout !== "" || stderr !== "") {
+  if (outcome.code !== 0 || outcome.signal !== null || stdout !== "" || stderr !== "") {
     console.error(stdout + stderr);
     process.exit(1);
   }

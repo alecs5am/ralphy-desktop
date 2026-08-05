@@ -13,7 +13,7 @@ import {
   shell,
 } from "electron";
 import { readFileSync, statSync } from "node:fs";
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { Worker } from "node:worker_threads";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -98,7 +98,7 @@ import {
   readSecretHandoffRequest,
   runSecretHandoff,
   secretFileForProvider,
-  unboundSecretHandoffAuthorization,
+  secretProviderFromRef,
 } from "./migration/secret-handoff";
 import { RalphyBridgeClient } from "./ralphy/client";
 import { resolveRalphyExecutable } from "./ralphy/executable";
@@ -1214,6 +1214,14 @@ function startSecretHandoff(): void {
     try {
       const userData = app.getPath("userData");
       const request = await readSecretHandoffRequest(process.stdin);
+      const provider = secretProviderFromRef(request.ref);
+      if (!provider) throw new Error("Unsupported secret handoff provider");
+      const sourcePath = await realpath(join(dirname(dirname(dirname(request.stagedRoot))), ".ralphy"));
+      if (SMOKE_TEST) {
+        await captureStagedRootIdentity(request.stagedRoot);
+        app.exit(0);
+        return;
+      }
       await runSecretHandoff(request, {
         stores: {
           anthropic: new ClaudeCredentialStore({
@@ -1230,7 +1238,8 @@ function startSecretHandoff(): void {
           ralphyBin ? { bin: ralphyBin, root } : { root },
         ),
         captureRoot: captureStagedRootIdentity,
-        authorizeMaintenance: unboundSecretHandoffAuthorization,
+        sourcePath,
+        encryptedSourcePath: await realpath(join(userData, secretFileForProvider(provider))),
       });
       app.exit(0);
     } catch {

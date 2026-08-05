@@ -393,6 +393,9 @@ export interface LocatorDto { absolutePath: string; mime: string | null; bytes: 
 export interface MigrationDto { runId: string; state: string; issues: number }
 
 export interface MigrationSecretImportParams {
+  sourcePath: string;
+  encryptedSourcePath: string;
+  authorizationNonce: string;
   runId: string;
   sourceEntryId: string;
   ref: string;

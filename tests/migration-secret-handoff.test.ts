@@ -23,7 +23,6 @@ import {
   readSecretHandoffRequest,
   runSecretHandoff,
   secretFileForProvider,
-  unboundSecretHandoffAuthorization,
   type SecretHandoffBridge,
 } from "../electron/migration/secret-handoff";
 
@@ -33,28 +32,52 @@ const workspaceId = "ws_33333333-3333-4333-8333-333333333333";
 const rootId = "a".repeat(64);
 const rootDevice = 16_777_234;
 const rootInode = 123_456;
-const maintenanceNonce = "44444444-4444-4444-8444-444444444444";
+const authorizationNonce = "55555555-5555-4555-8555-555555555555";
 const execFileAsync = promisify(execFile);
 
 function request(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     v: 1,
+    authorizationNonce,
     runId,
-    root: `/tmp/ralphy/.ralphy-staging/${runId}/.ralphy`,
-    rootId,
-    rootDevice,
-    rootInode,
-    maintenanceNonce,
+    stagedRoot: `/tmp/ralphy/.ralphy-staging/${runId}/.ralphy`,
     sourceEntryId,
     ref: `provider/anthropic/workspace/${workspaceId}/workspace/${workspaceId}`,
-    provider: "anthropic",
+    kind: "text",
     ...overrides,
   };
 }
 
+function frame(value: unknown): string {
+  return `${JSON.stringify(value)}\n`;
+}
+
 describe("migration secret handoff request", () => {
+  test("accepts the exact metadata-only Core authorization contract", () => {
+    const coreRequest = {
+      v: 1,
+      authorizationNonce: "55555555-5555-4555-8555-555555555555",
+      runId,
+      stagedRoot: `/tmp/ralphy/.ralphy-staging/${runId}/.ralphy`,
+      sourceEntryId,
+      ref: `provider/anthropic/workspace/${workspaceId}/workspace/${workspaceId}`,
+      kind: "text",
+    };
+
+    expect(parseSecretHandoffRequest(frame(coreRequest))).toEqual(coreRequest);
+  });
+
+  test.each([
+    ["missing terminal LF", JSON.stringify(request())],
+    ["CRLF", `${JSON.stringify(request())}\r\n`],
+    ["extra line", `${JSON.stringify(request())}\n\n`],
+    ["leading whitespace", ` ${JSON.stringify(request())}\n`],
+  ])("rejects %s in the exact one-line Core frame", (_name, raw) => {
+    expect(() => parseSecretHandoffRequest(raw)).toThrow();
+  });
+
   test("parses the exact bounded stdin request", async () => {
-    const raw = JSON.stringify(request());
+    const raw = frame(request());
     const parsed = parseSecretHandoffRequest(raw);
     expect(parsed).toEqual(request());
 
@@ -76,25 +99,22 @@ describe("migration secret handoff request", () => {
     ["extra field", request({ extra: true })],
     ["missing field", (() => { const value = request(); delete value.ref; return value; })()],
     ["wrong version", request({ v: 2 })],
-    ["relative root", request({ root: `.ralphy-staging/${runId}/.ralphy` })],
-    ["normal live root", request({ root: "/tmp/ralphy/.ralphy" })],
-    ["non-normal root", request({ root: `/tmp/ralphy/../ralphy/.ralphy-staging/${runId}/.ralphy` })],
-    ["root run mismatch", request({ root: "/tmp/ralphy/.ralphy-staging/mig_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/.ralphy" })],
-    ["invalid root id", request({ rootId: "root-id" })],
-    ["invalid root device", request({ rootDevice: -1 })],
-    ["invalid root inode", request({ rootInode: 1.5 })],
-    ["invalid maintenance nonce", request({ maintenanceNonce: "short" })],
+    ["relative root", request({ stagedRoot: `.ralphy-staging/${runId}/.ralphy` })],
+    ["normal live root", request({ stagedRoot: "/tmp/ralphy/.ralphy" })],
+    ["non-normal root", request({ stagedRoot: `/tmp/ralphy/../ralphy/.ralphy-staging/${runId}/.ralphy` })],
+    ["root run mismatch", request({ stagedRoot: "/tmp/ralphy/.ralphy-staging/mig_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/.ralphy" })],
+    ["invalid authorization nonce", request({ authorizationNonce: "short" })],
     ["unsafe migration id", request({ runId: "mig_../escape" })],
     ["unsafe source entry id", request({ sourceEntryId: "entry_missing" })],
-    ["provider ref mismatch", request({ provider: "openrouter" })],
     ["ref workspace mismatch", request({ ref: `provider/anthropic/workspace/${workspaceId}/workspace/ws_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa` })],
-    ["unsupported provider", request({ provider: "claude" })],
+    ["unsupported provider", request({ ref: `provider/claude/workspace/${workspaceId}/workspace/${workspaceId}` })],
+    ["unsupported kind", request({ kind: "file" })],
   ])("rejects %s", (_name, value) => {
-    expect(() => parseSecretHandoffRequest(JSON.stringify(value))).toThrow();
+    expect(() => parseSecretHandoffRequest(frame(value))).toThrow();
   });
 
   test("rejects malformed, multiple, empty, and oversized stdin", async () => {
-    expect(() => parseSecretHandoffRequest("not-json")).toThrow();
+    expect(() => parseSecretHandoffRequest("not-json\n")).toThrow();
     expect(() => parseSecretHandoffRequest(`${JSON.stringify(request())}\n{}`)).toThrow();
     expect(() => parseSecretHandoffRequest("")).toThrow();
 
@@ -154,37 +174,51 @@ describe("migration secret handoff lifecycle", () => {
       calls,
       createBridge(root: string) {
         calls.created += 1;
-        expect(root).toBe(request().root);
+        expect(root).toBe(request().stagedRoot);
         return bridge;
       },
     };
   }
 
   const identity = { rootId, rootDevice, rootInode };
+  const handoffPaths = {
+    sourcePath: "/tmp/ralphy/.ralphy",
+    encryptedSourcePath: "/tmp/desktop/claude-api-key.bin",
+  };
 
-  test("fails closed while Task 8 PID and nonce authorization is unavailable", async () => {
+  test("passes the exact Core authorization envelope to the write-only bridge", async () => {
     const fixture = setupBridge();
-    const captureRoot = vi.fn(async () => identity);
-    const read = vi.fn(async () => "sk-ant-fixture-secret-value");
-    await expect(runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request())), {
-      stores: { anthropic: { read }, openrouter: { read: async () => null } },
+    await expect(runSecretHandoff(parseSecretHandoffRequest(frame(request())), {
+      stores: {
+        anthropic: { read: async () => "sk-ant-fixture-secret-value" },
+        openrouter: { read: async () => null },
+      },
       createBridge: fixture.createBridge,
-      captureRoot,
-      authorizeMaintenance: unboundSecretHandoffAuthorization,
-    })).rejects.toThrow("Task 8 PID and maintenance nonce binding is not installed");
-    expect(captureRoot).not.toHaveBeenCalled();
-    expect(read).not.toHaveBeenCalled();
-    expect(fixture.calls.created).toBe(0);
+      captureRoot: async () => identity,
+      sourcePath: "/tmp/ralphy/.ralphy",
+      encryptedSourcePath: "/tmp/desktop/claude-api-key.bin",
+    })).resolves.toBeUndefined();
+
+    expect(fixture.calls.requested).toEqual([["migration.secret.import", {
+      sourcePath: "/tmp/ralphy/.ralphy",
+      encryptedSourcePath: "/tmp/desktop/claude-api-key.bin",
+      authorizationNonce,
+      runId,
+      sourceEntryId,
+      ref: request().ref,
+      kind: "text",
+      value: "sk-ant-fixture-secret-value",
+    }]]);
   });
 
   test("validates the physical staged root before decrypting", async () => {
     const fixture = setupBridge();
     const read = vi.fn(async () => "sk-ant-fixture-secret-value");
-    await expect(runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request())), {
+    await expect(runSecretHandoff(parseSecretHandoffRequest(frame(request())), {
       stores: { anthropic: { read }, openrouter: { read: async () => null } },
       createBridge: fixture.createBridge,
       captureRoot: async () => { throw new Error("staged root is an alias"); },
-      authorizeMaintenance: async () => undefined,
+      ...handoffPaths,
     })).rejects.toThrow("staged root is an alias");
     expect(read).not.toHaveBeenCalled();
     expect(fixture.calls.created).toBe(0);
@@ -195,14 +229,14 @@ describe("migration secret handoff lifecycle", () => {
     const reads = { anthropic: 0, openrouter: 0 };
     const secret = "sk-ant-fixture-secret-value";
 
-    await expect(runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request())), {
+    await expect(runSecretHandoff(parseSecretHandoffRequest(frame(request())), {
       stores: {
         anthropic: { read: async () => { reads.anthropic += 1; return secret; } },
         openrouter: { read: async () => { reads.openrouter += 1; return "unused"; } },
       },
       createBridge: fixture.createBridge,
       captureRoot: async () => identity,
-      authorizeMaintenance: async () => undefined,
+      ...handoffPaths,
     })).resolves.toBeUndefined();
 
     expect(reads).toEqual({ anthropic: 1, openrouter: 0 });
@@ -210,6 +244,8 @@ describe("migration secret handoff lifecycle", () => {
       created: 1,
       started: 1,
       requested: [["migration.secret.import", {
+        ...handoffPaths,
+        authorizationNonce,
         runId,
         sourceEntryId,
         ref: request().ref,
@@ -225,8 +261,7 @@ describe("migration secret handoff lifecycle", () => {
     const fixture = setupBridge({ result: { ref: openrouterRef, kind: "text", completed: true } });
     const anthropicRead = vi.fn(async () => "unused");
     const openrouterRead = vi.fn(async () => "sk-or-v1-fixture-secret-1234567890");
-    await runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request({
-      provider: "openrouter",
+    await runSecretHandoff(parseSecretHandoffRequest(frame(request({
       ref: openrouterRef,
     }))), {
       stores: {
@@ -235,7 +270,7 @@ describe("migration secret handoff lifecycle", () => {
       },
       createBridge: fixture.createBridge,
       captureRoot: async () => identity,
-      authorizeMaintenance: async () => undefined,
+      ...handoffPaths,
     });
     expect(anthropicRead).not.toHaveBeenCalled();
     expect(openrouterRead).toHaveBeenCalledTimes(1);
@@ -246,11 +281,11 @@ describe("migration secret handoff lifecycle", () => {
     ["decrypt-invalid", async () => { throw new Error("decrypt failed"); }],
   ])("fails closed before starting a bridge for a %s credential", async (_name, read) => {
     const fixture = setupBridge();
-    await expect(runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request())), {
+    await expect(runSecretHandoff(parseSecretHandoffRequest(frame(request())), {
       stores: { anthropic: { read }, openrouter: { read: async () => null } },
       createBridge: fixture.createBridge,
       captureRoot: async () => identity,
-      authorizeMaintenance: async () => undefined,
+      ...handoffPaths,
     })).rejects.toThrow();
     expect(fixture.calls).toEqual({ created: 0, started: 0, requested: [], closed: 0 });
   });
@@ -263,14 +298,14 @@ describe("migration secret handoff lifecycle", () => {
     ["missing field", { ref: request().ref, completed: true }],
   ])("rejects a %s bridge result and closes the child", async (_name, result) => {
     const fixture = setupBridge({ result });
-    await expect(runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request())), {
+    await expect(runSecretHandoff(parseSecretHandoffRequest(frame(request())), {
       stores: {
         anthropic: { read: async () => "sk-ant-fixture-secret-value" },
         openrouter: { read: async () => null },
       },
       createBridge: fixture.createBridge,
       captureRoot: async () => identity,
-      authorizeMaintenance: async () => undefined,
+      ...handoffPaths,
     })).rejects.toThrow();
     expect(fixture.calls.closed).toBe(1);
   });
@@ -283,14 +318,14 @@ describe("migration secret handoff lifecycle", () => {
     const stdout = vi.spyOn(process.stdout, "write");
     const stderr = vi.spyOn(process.stderr, "write");
     try {
-      await expect(runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request())), {
+      await expect(runSecretHandoff(parseSecretHandoffRequest(frame(request())), {
         stores: {
           anthropic: { read: async () => "sk-ant-fixture-secret-value" },
           openrouter: { read: async () => null },
         },
         createBridge: fixture.createBridge,
         captureRoot: async () => identity,
-        authorizeMaintenance: async () => undefined,
+        ...handoffPaths,
       })).rejects.toThrow("child failed");
       expect(fixture.calls.closed).toBe(1);
       expect(stdout).not.toHaveBeenCalled();
@@ -304,14 +339,14 @@ describe("migration secret handoff lifecycle", () => {
   test("fences the same root identity around hello and the import request", async () => {
     const fixture = setupBridge();
     const captureRoot = vi.fn(async () => identity);
-    await runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request())), {
+    await runSecretHandoff(parseSecretHandoffRequest(frame(request())), {
       stores: {
         anthropic: { read: async () => "sk-ant-fixture-secret-value" },
         openrouter: { read: async () => null },
       },
       createBridge: fixture.createBridge,
       captureRoot,
-      authorizeMaintenance: async () => undefined,
+      ...handoffPaths,
     });
     expect(captureRoot).toHaveBeenCalledTimes(5);
   });
@@ -320,21 +355,21 @@ describe("migration secret handoff lifecycle", () => {
     const swapped = { ...identity, rootInode: rootInode + 1 };
     const fixture = setupBridge();
     let captures = 0;
-    await expect(runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request())), {
+    await expect(runSecretHandoff(parseSecretHandoffRequest(frame(request())), {
       stores: {
         anthropic: { read: async () => "sk-ant-fixture-secret-value" },
         openrouter: { read: async () => null },
       },
       createBridge: fixture.createBridge,
       captureRoot: async () => (++captures === 3 ? swapped : identity),
-      authorizeMaintenance: async () => undefined,
+      ...handoffPaths,
     })).rejects.toThrow();
     expect(fixture.calls.requested).toHaveLength(0);
     expect(fixture.calls.closed).toBe(1);
 
     const wrongHello = setupBridge();
     const originalStart = wrongHello.createBridge;
-    await expect(runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request())), {
+    await expect(runSecretHandoff(parseSecretHandoffRequest(frame(request())), {
       stores: {
         anthropic: { read: async () => "sk-ant-fixture-secret-value" },
         openrouter: { read: async () => null },
@@ -344,7 +379,7 @@ describe("migration secret handoff lifecycle", () => {
         start: async () => ({ rootId: "b".repeat(64) }),
       }),
       captureRoot: async () => identity,
-      authorizeMaintenance: async () => undefined,
+      ...handoffPaths,
     })).rejects.toThrow();
   });
 
@@ -396,10 +431,16 @@ process.stdin.on("end", () => {
     process.stdout.write("RALPHY_TERMINAL_BRIDGE_READY\\nRALPHY_SMOKE_READY\\n");
     process.exit(0);
   }
-  const request = JSON.parse(input);
-  if (Object.hasOwn(request, "value") || Object.hasOwn(request, "secret")) process.exit(2);
+  if (!input.endsWith("\\n") || input.indexOf("\\n") !== input.length - 1) process.exit(2);
+  const request = JSON.parse(input.slice(0, -1));
+  const keys = Object.keys(request);
+  const expected = ["v", "authorizationNonce", "runId", "stagedRoot", "sourceEntryId", "ref", "kind"];
+  if (JSON.stringify(keys) !== JSON.stringify(expected)
+    || request.kind !== "text"
+    || Object.hasOwn(request, "value")
+    || Object.hasOwn(request, "secret")) process.exit(2);
   process.stdout.write(${JSON.stringify(helperOutput)});
-  process.exit(1);
+  process.exit(0);
 });
 `);
     await chmod(executable, 0o755);
@@ -416,7 +457,7 @@ process.stdin.on("end", () => {
     });
   }
 
-  test("selects the silent helper branch and accepts its fail-closed exit", async () => {
+  test("selects the silent helper branch with the exact current Core frame", async () => {
     const fixture = await packagedFixture();
     try {
       await expect(runPackagedSmoke(fixture.app)).resolves.toMatchObject({
