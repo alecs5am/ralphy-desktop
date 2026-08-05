@@ -1,6 +1,18 @@
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, test, vi } from "vitest";
 
 import {
@@ -22,6 +34,7 @@ const rootId = "a".repeat(64);
 const rootDevice = 16_777_234;
 const rootInode = 123_456;
 const maintenanceNonce = "44444444-4444-4444-8444-444444444444";
+const execFileAsync = promisify(execFile);
 
 function request(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -354,5 +367,73 @@ describe("migration secret handoff lifecycle", () => {
     expect(helper).toHaveBeenCalledTimes(1);
     expect(normal).not.toHaveBeenCalled();
     for (const start of Object.values(seams)) expect(start).not.toHaveBeenCalled();
+  });
+});
+
+describe("packaged migration secret handoff smoke", () => {
+  async function packagedFixture(helperOutput = ""): Promise<{
+    app: string;
+    cleanup(): Promise<void>;
+  }> {
+    const fixture = await realpath(await mkdtemp(join(tmpdir(), "ralphy-secret-smoke-")));
+    const app = join(fixture, "Ralphy Media.app");
+    const resources = join(app, "Contents", "Resources");
+    const macos = join(app, "Contents", "MacOS");
+    const core = join(resources, "bin", "ralphy");
+    const executable = join(macos, "Ralphy Media");
+    await mkdir(join(resources, "bin"), { recursive: true });
+    await mkdir(macos, { recursive: true });
+    await writeFile(core, `#!/usr/bin/env node\nprocess.stdout.write("9.9.9\\n");\n`);
+    await chmod(core, 0o755);
+    const sha256 = createHash("sha256").update(await readFile(core)).digest("hex");
+    await writeFile(join(resources, "ralphy-core.json"), JSON.stringify({ version: "9.9.9", sha256 }));
+    await writeFile(executable, `#!/usr/bin/env node
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  if (!process.argv.includes("--migration-secret-handoff") || !process.argv.includes("--smoke-test")) {
+    process.stdout.write("RALPHY_TERMINAL_BRIDGE_READY\\nRALPHY_SMOKE_READY\\n");
+    process.exit(0);
+  }
+  const request = JSON.parse(input);
+  if (Object.hasOwn(request, "value") || Object.hasOwn(request, "secret")) process.exit(2);
+  process.stdout.write(${JSON.stringify(helperOutput)});
+  process.exit(1);
+});
+`);
+    await chmod(executable, 0o755);
+    return { app, cleanup: () => rm(fixture, { recursive: true, force: true }) };
+  }
+
+  async function runPackagedSmoke(app: string) {
+    return execFileAsync(process.execPath, [
+      join(process.cwd(), "scripts", "smoke-electron.mjs"),
+      "--secret-handoff",
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, RALPHY_PACKAGED_APP: app },
+    });
+  }
+
+  test("selects the silent helper branch and accepts its fail-closed exit", async () => {
+    const fixture = await packagedFixture();
+    try {
+      await expect(runPackagedSmoke(fixture.app)).resolves.toMatchObject({
+        stdout: "Packaged secret handoff smoke passed\n",
+        stderr: "",
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("rejects any helper startup marker or protocol output", async () => {
+    const fixture = await packagedFixture("RALPHY_WATCHER_STARTED\n");
+    try {
+      await expect(runPackagedSmoke(fixture.app)).rejects.toThrow();
+    } finally {
+      await fixture.cleanup();
+    }
   });
 });

@@ -6,9 +6,14 @@ import { join, resolve } from "node:path";
 import { sha256File, validateCoreSource } from "./bundled-core.mjs";
 
 const root = resolve(import.meta.dirname, "..");
+const secretHandoffSmoke = process.argv.includes("--secret-handoff");
 const packagedApp = process.env.RALPHY_PACKAGED_APP
   ? resolve(root, process.env.RALPHY_PACKAGED_APP)
   : undefined;
+
+if (secretHandoffSmoke && !packagedApp) {
+  throw new Error("Secret handoff smoke requires RALPHY_PACKAGED_APP");
+}
 
 let executable = join(root, "node_modules/.bin/electron");
 let appArguments = ["."];
@@ -30,31 +35,68 @@ if (packagedApp) {
   appArguments = [];
 }
 const userData = await mkdtemp(join(tmpdir(), "ralphy-media-smoke-"));
+const runId = "mig_11111111-1111-4111-8111-111111111111";
+const workspaceId = "ws_33333333-3333-4333-8333-333333333333";
+const handoffRequest = {
+  v: 1,
+  runId,
+  root: join(userData, ".ralphy-staging", runId, ".ralphy"),
+  rootId: "0".repeat(64),
+  rootDevice: 0,
+  rootInode: 0,
+  maintenanceNonce: "smoke-only-maintenance-nonce",
+  sourceEntryId: "mentry_22222222-2222-4222-8222-222222222222",
+  ref: `provider/anthropic/workspace/${workspaceId}/workspace/${workspaceId}`,
+  provider: "anthropic",
+};
 const child = spawn(
   executable,
-  [...appArguments, "--smoke-test", `--user-data-dir=${userData}`],
+  [
+    ...appArguments,
+    ...(secretHandoffSmoke ? ["--migration-secret-handoff"] : []),
+    "--smoke-test",
+    `--user-data-dir=${userData}`,
+  ],
   {
     cwd: root,
-    env: { ...process.env, RALPHY_SMOKE_TEST: "1" },
-    stdio: ["ignore", "pipe", "pipe"],
+    env: secretHandoffSmoke
+      ? process.env
+      : { ...process.env, RALPHY_SMOKE_TEST: "1" },
+    stdio: ["pipe", "pipe", "pipe"],
   },
 );
 
-let output = "";
+let stdout = "";
+let stderr = "";
 child.stdout.on("data", (chunk) => {
-  output += chunk;
+  stdout += chunk;
 });
 child.stderr.on("data", (chunk) => {
-  output += chunk;
+  stderr += chunk;
 });
+child.stdin.end(secretHandoffSmoke ? JSON.stringify(handoffRequest) : undefined);
 
 const timeout = setTimeout(() => child.kill("SIGTERM"), 15_000);
-const exitCode = await new Promise((resolveExit) => child.once("exit", resolveExit));
+const outcome = await new Promise((resolveExit) => child.once(
+  "close",
+  (code, signal) => resolveExit({ code, signal }),
+));
 clearTimeout(timeout);
 await rm(userData, { recursive: true, force: true });
 
+if (secretHandoffSmoke) {
+  if (outcome.code !== 1 || outcome.signal !== null || stdout !== "" || stderr !== "") {
+    console.error(stdout + stderr);
+    process.exit(1);
+  }
+  console.log("Packaged secret handoff smoke passed");
+  process.exit(0);
+}
+
+const output = stdout + stderr;
 if (
-  exitCode !== 0
+  outcome.code !== 0
+  || outcome.signal !== null
   || !output.includes("RALPHY_SMOKE_READY")
   || !output.includes("RALPHY_TERMINAL_BRIDGE_READY")
 ) {
