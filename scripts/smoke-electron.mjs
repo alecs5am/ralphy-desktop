@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -34,7 +34,7 @@ if (packagedApp) {
   executable = join(packagedApp, "Contents/MacOS/Ralphy Media");
   appArguments = [];
 }
-const userData = await mkdtemp(join(tmpdir(), "ralphy-media-smoke-"));
+const userData = await realpath(await mkdtemp(join(tmpdir(), "ralphy-media-smoke-")));
 const runId = "mig_11111111-1111-4111-8111-111111111111";
 const workspaceId = "ws_33333333-3333-4333-8333-333333333333";
 const stagedRoot = join(userData, ".ralphy-staging", runId, ".ralphy");
