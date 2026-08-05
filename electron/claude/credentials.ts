@@ -1,4 +1,5 @@
-import { lstat, mkdir, readFile, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, open, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { guardedAtomicWrite } from "../media/atomic-write";
@@ -15,6 +16,7 @@ interface EncryptedCredentialStoreOptions {
   path: string;
   cipher: CredentialCipher;
   validate(value: string): string;
+  openFile?: typeof open;
 }
 
 export function validateAnthropicApiKey(value: string): string {
@@ -36,11 +38,13 @@ export function validateOpenRouterApiKey(value: string): string {
 export class EncryptedCredentialStore {
   readonly #path: string;
   readonly #cipher: CredentialCipher;
+  readonly #openFile: typeof open;
   readonly #validate: (value: string) => string;
 
   constructor(options: EncryptedCredentialStoreOptions) {
     this.#path = options.path;
     this.#cipher = options.cipher;
+    this.#openFile = options.openFile ?? open;
     this.#validate = options.validate;
   }
 
@@ -59,13 +63,32 @@ export class EncryptedCredentialStore {
 
   async read(): Promise<string | null> {
     if (!this.#cipher.isEncryptionAvailable()) return null;
-    const info = await lstat(this.#path).catch(() => null);
-    if (!info?.isFile() || info.isSymbolicLink() || info.size > MAX_CREDENTIAL_BYTES) return null;
+    let handle: Awaited<ReturnType<typeof open>> | null = null;
     try {
-      const encrypted = await readFile(this.#path);
-      return this.#validate(this.#cipher.decryptString(encrypted));
+      handle = await this.#openFile(
+        this.#path,
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      );
+      const info = await handle.stat();
+      if (!info.isFile() || info.size <= 0 || info.size > MAX_CREDENTIAL_BYTES) return null;
+      const encrypted = Buffer.alloc(MAX_CREDENTIAL_BYTES + 1);
+      let bytes = 0;
+      while (bytes < encrypted.length) {
+        const read = await handle.read(
+          encrypted,
+          bytes,
+          encrypted.length - bytes,
+          bytes,
+        );
+        if (read.bytesRead === 0) break;
+        bytes += read.bytesRead;
+      }
+      if (bytes <= 0 || bytes > MAX_CREDENTIAL_BYTES) return null;
+      return this.#validate(this.#cipher.decryptString(encrypted.subarray(0, bytes)));
     } catch {
       return null;
+    } finally {
+      await handle?.close().catch(() => undefined);
     }
   }
 

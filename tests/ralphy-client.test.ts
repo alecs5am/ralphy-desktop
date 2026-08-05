@@ -1,6 +1,8 @@
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough, Writable } from "node:stream";
 
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
@@ -20,6 +22,72 @@ import type {
 
 let fixtureDirectory: string;
 let fixtureBin: string;
+
+function injectedBridge(mode: "success" | "error" | "backpressure-close") {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  let secretFrame: Buffer | null = null;
+  let releaseWrite: ((error?: Error | null) => void) | null = null;
+  const send = (message: unknown) => stdout.write(`${JSON.stringify(message)}\n`);
+  const stdin = new Writable({
+    highWaterMark: mode === "backpressure-close" ? 1 : 16 * 1024,
+    write(chunk: Buffer, _encoding, callback) {
+      const frame = chunk;
+      const request = JSON.parse(frame.toString()) as { id: string; method: string; params?: Record<string, unknown> };
+      if (request.method === "system.hello") {
+        callback();
+        setImmediate(() => send({ v: 1, id: request.id, ok: true, result: {
+          protocolVersion: 1,
+          coreVersion: "1",
+          schemaVersion: 9,
+          storeId: "store-injected",
+          rootId: "a".repeat(64),
+          capabilities: [...BRIDGE_METHODS],
+          activitySequence: 0,
+          startup: { state: "ready", migration: "complete" },
+          limits: BRIDGE_LIMITS,
+        } }));
+        return;
+      }
+      secretFrame = frame;
+      if (mode === "error") {
+        callback(new Error("injected write failure"));
+      } else if (mode === "backpressure-close") {
+        releaseWrite = callback;
+      } else {
+        callback();
+        setImmediate(() => send({ v: 1, id: request.id, ok: true, result: {
+          ref: request.params?.ref,
+          kind: "text",
+          completed: true,
+        } }));
+      }
+    },
+  });
+  const child = Object.assign(new EventEmitter(), {
+    stdin,
+    stdout,
+    stderr,
+    exitCode: null as number | null,
+    signalCode: null as NodeJS.Signals | null,
+    killed: false,
+    kill() {
+      this.killed = true;
+      this.signalCode = "SIGTERM";
+      setImmediate(() => this.emit("close", null, "SIGTERM"));
+      return true;
+    },
+  });
+  stdin.on("finish", () => {
+    child.exitCode = 0;
+    setImmediate(() => child.emit("close", 0, null));
+  });
+  return {
+    child,
+    secretFrame: () => secretFrame,
+    releaseWrite: () => releaseWrite?.(),
+  };
+}
 
 function fixtureRequest<Result extends JsonValue = JsonValue>(
   client: RalphyBridgeClient,
@@ -71,27 +139,17 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     const delay = root.includes("slow-hello") ? 40 : 0;
     const result = {
       protocolVersion: root.includes("protocol-2") ? 2 : 1,
-      contractVersion: 1,
       schemaVersion: 9,
       coreVersion: "2.0.0-test",
       storeId: "store-test",
-      rootId: "root-test",
-      consumerNamespaces: ["farm"],
-      consumers: {
-        farm: {
-          namespace: "farm",
-          state: "pending",
-          coreMigrationRunId: root.includes("bad-farm-id") ? "migration run 1" : "migration-run-1",
-          migrationId: "migration-1",
-          stageDigest: root.includes("bad-farm-digest") ? "stage-digest" : "a".repeat(64),
-          readyRecordDigest: "b".repeat(64),
-          identityDigest: null,
-        },
-      },
-      methods: root.includes("missing-method")
+      rootId: root.includes("bad-root-id") ? "root-test" : "a".repeat(64),
+      capabilities: root.includes("missing-method")
         ? ${JSON.stringify(BRIDGE_METHODS)}.filter((method) => method !== "media.review")
         : ${JSON.stringify(BRIDGE_METHODS)},
       activitySequence: 6,
+      startup: root.includes("bad-startup")
+        ? { state: "starting", migration: "complete" }
+        : { state: "ready", migration: "complete" },
       limits: {
         maxFrameBytes: 1048576,
         maxRequestIdBytes: 128,
@@ -258,13 +316,51 @@ afterAll(async () => {
 });
 
 describe("RalphyBridgeClient", () => {
+  test.each(["success", "error", "backpressure-close"] as const)(
+    "zeroes the sensitive import frame after %s",
+    async (mode) => {
+      const injected = injectedBridge(mode);
+      const client = new RalphyBridgeClient({
+        root: "/library",
+        spawn: () => injected.child as never,
+      });
+      await client.start();
+      const secret = "sk-ant-sensitive-frame-1234567890";
+      const pending = client.request("migration.secret.import", {
+        runId: "mig_test",
+        sourceEntryId: "mentry_test",
+        ref: "provider/anthropic/workspace/ws_test/workspace/ws_test",
+        kind: "text",
+        value: secret,
+      });
+
+      if (mode === "success") await expect(pending).resolves.toMatchObject({ completed: true });
+      else if (mode === "error") await expect(pending).rejects.toThrow();
+      else {
+        const observed = pending.catch((error: unknown) => error);
+        const closing = client.close();
+        const frame = injected.secretFrame();
+        expect(frame).not.toBeNull();
+        expect(frame?.every((byte) => byte === 0)).toBe(true);
+        injected.releaseWrite();
+        await Promise.all([closing, observed]);
+      }
+
+      const frame = injected.secretFrame();
+      expect(frame).not.toBeNull();
+      expect(frame?.every((byte) => byte === 0)).toBe(true);
+      expect(String(await pending.catch((error: unknown) => error))).not.toContain(secret);
+      await client.close();
+    },
+  );
+
   test("discovers RALPHY_BIN when bin is omitted from the public client options", async () => {
     const client = new RalphyBridgeClient({
       root: "/library",
       env: { HOME: fixtureDirectory, RALPHY_BIN: fixtureBin },
     });
 
-    await expect(client.start()).resolves.toMatchObject({ rootId: "root-test" });
+    await expect(client.start()).resolves.toMatchObject({ rootId: "a".repeat(64) });
     await client.close();
   });
 
@@ -362,7 +458,7 @@ describe("RalphyBridgeClient", () => {
       idempotencyKey: "key-1",
     } as const;
 
-    const operation: ResultFor<"generation.start"> = {
+    const operation: ResultFor<"composition.build"> = {
       runId: "run-1",
       state: "pending",
       results: {
@@ -380,10 +476,6 @@ describe("RalphyBridgeClient", () => {
     };
 
     const operationStarts: [
-      ParamsFor<"generation.start">,
-      ParamsFor<"transform.start">,
-      ParamsFor<"transcription.start">,
-      ParamsFor<"repair.start">,
       ParamsFor<"composition.build">,
       ParamsFor<"unit.revise">,
       ParamsFor<"publication.publish">,
@@ -393,10 +485,6 @@ describe("RalphyBridgeClient", () => {
       ParamsFor<"agent.turn.start">,
       ParamsFor<"agent.turn.resume">,
     ] = [
-      { context, external, input: {} },
-      { context, external, source: { type: "artifact", id: "artifact-1" }, input: {} },
-      { context, external, source: { type: "artifact", id: "artifact-1" } },
-      { context, external, target: { type: "artifact", id: "artifact-1" }, input: {} },
       { context, external, compositionRevisionId: "composition-revision-1" },
       { context, external, unitId: "unit-1", expectedLatestRevisionId: "unit-revision-1", input: {} },
       { context, external, unitRevisionId: "unit-revision-1", platform: "tiktok" },
@@ -445,11 +533,11 @@ describe("RalphyBridgeClient", () => {
     // @ts-expect-error operation.find requires a complete external tuple.
     acceptsFind({ context, external: { runId: external.runId, nodeId: external.nodeId, attempt: 1 } });
 
-    const acceptsGeneration = (_params: ParamsFor<"generation.start">) => true;
+    const acceptsBuild = (_params: ParamsFor<"composition.build">) => true;
     // @ts-expect-error operation idempotency belongs to the exact external object.
-    acceptsGeneration({ context, idempotencyKey: "top-level-key", input: {} });
+    acceptsBuild({ context, idempotencyKey: "top-level-key", compositionRevisionId: "composition-revision-1" });
     // @ts-expect-error callers cannot provide storage-shaped external field names.
-    acceptsGeneration({ context, external: { externalSystem: "ralphy-farm", externalRunId: "run-1", externalNodeId: "node-1", externalAttempt: 1 }, input: {} });
+    acceptsBuild({ context, external: { externalSystem: "farm", externalRunId: "run-1", externalNodeId: "node-1", externalAttempt: 1 }, compositionRevisionId: "composition-revision-1" });
 
     const projectBinding: ParamsFor<"document.bind"> = {
       context,
@@ -551,25 +639,13 @@ describe("RalphyBridgeClient", () => {
 
     await expect(client.start()).resolves.toEqual({
       protocolVersion: 1,
-      contractVersion: 1,
       schemaVersion: 9,
       coreVersion: "2.0.0-test",
       storeId: "store-test",
-      rootId: "root-test",
-      consumerNamespaces: ["farm"],
-      consumers: {
-        farm: {
-          namespace: "farm",
-          state: "pending",
-          coreMigrationRunId: "migration-run-1",
-          migrationId: "migration-1",
-          stageDigest: "a".repeat(64),
-          readyRecordDigest: "b".repeat(64),
-          identityDigest: null,
-        },
-      },
-      methods: [...BRIDGE_METHODS],
+      rootId: "a".repeat(64),
+      capabilities: [...BRIDGE_METHODS],
       activitySequence: 6,
+      startup: { state: "ready", migration: "complete" },
       limits: {
         maxFrameBytes: 1048576,
         maxRequestIdBytes: 128,
@@ -650,8 +726,8 @@ describe("RalphyBridgeClient", () => {
     await client.close();
   });
 
-  test.each(["bad-farm-id", "bad-farm-digest"])(
-    "rejects non-canonical Farm hello metadata: %s",
+  test.each(["bad-root-id", "bad-startup"])(
+    "rejects invalid current Core hello metadata: %s",
     async (root) => {
       const client = new RalphyBridgeClient({ bin: fixtureBin, root: `/${root}` });
 

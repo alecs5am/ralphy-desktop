@@ -11,18 +11,27 @@ import {
   readSecretHandoffRequest,
   runSecretHandoff,
   secretFileForProvider,
+  unboundSecretHandoffAuthorization,
   type SecretHandoffBridge,
 } from "../electron/migration/secret-handoff";
 
 const runId = "mig_11111111-1111-4111-8111-111111111111";
 const sourceEntryId = "mentry_22222222-2222-4222-8222-222222222222";
 const workspaceId = "ws_33333333-3333-4333-8333-333333333333";
+const rootId = "a".repeat(64);
+const rootDevice = 16_777_234;
+const rootInode = 123_456;
+const maintenanceNonce = "44444444-4444-4444-8444-444444444444";
 
 function request(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     v: 1,
     runId,
     root: `/tmp/ralphy/.ralphy-staging/${runId}/.ralphy`,
+    rootId,
+    rootDevice,
+    rootInode,
+    maintenanceNonce,
     sourceEntryId,
     ref: `provider/anthropic/workspace/${workspaceId}/workspace/${workspaceId}`,
     provider: "anthropic",
@@ -58,6 +67,10 @@ describe("migration secret handoff request", () => {
     ["normal live root", request({ root: "/tmp/ralphy/.ralphy" })],
     ["non-normal root", request({ root: `/tmp/ralphy/../ralphy/.ralphy-staging/${runId}/.ralphy` })],
     ["root run mismatch", request({ root: "/tmp/ralphy/.ralphy-staging/mig_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/.ralphy" })],
+    ["invalid root id", request({ rootId: "root-id" })],
+    ["invalid root device", request({ rootDevice: -1 })],
+    ["invalid root inode", request({ rootInode: 1.5 })],
+    ["invalid maintenance nonce", request({ maintenanceNonce: "short" })],
     ["unsafe migration id", request({ runId: "mig_../escape" })],
     ["unsafe source entry id", request({ sourceEntryId: "entry_missing" })],
     ["provider ref mismatch", request({ provider: "openrouter" })],
@@ -109,6 +122,7 @@ describe("migration secret handoff lifecycle", () => {
       async start() {
         calls.started += 1;
         if (options.startError) throw options.startError;
+        return { rootId };
       },
       async request(method, params) {
         calls.requested.push([method, params]);
@@ -133,13 +147,31 @@ describe("migration secret handoff lifecycle", () => {
     };
   }
 
+  const identity = { rootId, rootDevice, rootInode };
+
+  test("fails closed while Task 8 PID and nonce authorization is unavailable", async () => {
+    const fixture = setupBridge();
+    const captureRoot = vi.fn(async () => identity);
+    const read = vi.fn(async () => "sk-ant-fixture-secret-value");
+    await expect(runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request())), {
+      stores: { anthropic: { read }, openrouter: { read: async () => null } },
+      createBridge: fixture.createBridge,
+      captureRoot,
+      authorizeMaintenance: unboundSecretHandoffAuthorization,
+    })).rejects.toThrow("Task 8 PID and maintenance nonce binding is not installed");
+    expect(captureRoot).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+    expect(fixture.calls.created).toBe(0);
+  });
+
   test("validates the physical staged root before decrypting", async () => {
     const fixture = setupBridge();
     const read = vi.fn(async () => "sk-ant-fixture-secret-value");
     await expect(runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request())), {
       stores: { anthropic: { read }, openrouter: { read: async () => null } },
       createBridge: fixture.createBridge,
-      validateRoot: async () => { throw new Error("staged root is an alias"); },
+      captureRoot: async () => { throw new Error("staged root is an alias"); },
+      authorizeMaintenance: async () => undefined,
     })).rejects.toThrow("staged root is an alias");
     expect(read).not.toHaveBeenCalled();
     expect(fixture.calls.created).toBe(0);
@@ -156,7 +188,8 @@ describe("migration secret handoff lifecycle", () => {
         openrouter: { read: async () => { reads.openrouter += 1; return "unused"; } },
       },
       createBridge: fixture.createBridge,
-      validateRoot: async () => undefined,
+      captureRoot: async () => identity,
+      authorizeMaintenance: async () => undefined,
     })).resolves.toBeUndefined();
 
     expect(reads).toEqual({ anthropic: 1, openrouter: 0 });
@@ -174,6 +207,27 @@ describe("migration secret handoff lifecycle", () => {
     });
   });
 
+  test("reads only the selected OpenRouter credential store", async () => {
+    const openrouterRef = `provider/openrouter/workspace/${workspaceId}/workspace/${workspaceId}`;
+    const fixture = setupBridge({ result: { ref: openrouterRef, kind: "text", completed: true } });
+    const anthropicRead = vi.fn(async () => "unused");
+    const openrouterRead = vi.fn(async () => "sk-or-v1-fixture-secret-1234567890");
+    await runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request({
+      provider: "openrouter",
+      ref: openrouterRef,
+    }))), {
+      stores: {
+        anthropic: { read: anthropicRead },
+        openrouter: { read: openrouterRead },
+      },
+      createBridge: fixture.createBridge,
+      captureRoot: async () => identity,
+      authorizeMaintenance: async () => undefined,
+    });
+    expect(anthropicRead).not.toHaveBeenCalled();
+    expect(openrouterRead).toHaveBeenCalledTimes(1);
+  });
+
   test.each([
     ["missing", async () => null],
     ["decrypt-invalid", async () => { throw new Error("decrypt failed"); }],
@@ -182,7 +236,8 @@ describe("migration secret handoff lifecycle", () => {
     await expect(runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request())), {
       stores: { anthropic: { read }, openrouter: { read: async () => null } },
       createBridge: fixture.createBridge,
-      validateRoot: async () => undefined,
+      captureRoot: async () => identity,
+      authorizeMaintenance: async () => undefined,
     })).rejects.toThrow();
     expect(fixture.calls).toEqual({ created: 0, started: 0, requested: [], closed: 0 });
   });
@@ -201,7 +256,8 @@ describe("migration secret handoff lifecycle", () => {
         openrouter: { read: async () => null },
       },
       createBridge: fixture.createBridge,
-      validateRoot: async () => undefined,
+      captureRoot: async () => identity,
+      authorizeMaintenance: async () => undefined,
     })).rejects.toThrow();
     expect(fixture.calls.closed).toBe(1);
   });
@@ -220,7 +276,8 @@ describe("migration secret handoff lifecycle", () => {
           openrouter: { read: async () => null },
         },
         createBridge: fixture.createBridge,
-        validateRoot: async () => undefined,
+        captureRoot: async () => identity,
+        authorizeMaintenance: async () => undefined,
       })).rejects.toThrow("child failed");
       expect(fixture.calls.closed).toBe(1);
       expect(stdout).not.toHaveBeenCalled();
@@ -229,6 +286,53 @@ describe("migration secret handoff lifecycle", () => {
       stdout.mockRestore();
       stderr.mockRestore();
     }
+  });
+
+  test("fences the same root identity around hello and the import request", async () => {
+    const fixture = setupBridge();
+    const captureRoot = vi.fn(async () => identity);
+    await runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request())), {
+      stores: {
+        anthropic: { read: async () => "sk-ant-fixture-secret-value" },
+        openrouter: { read: async () => null },
+      },
+      createBridge: fixture.createBridge,
+      captureRoot,
+      authorizeMaintenance: async () => undefined,
+    });
+    expect(captureRoot).toHaveBeenCalledTimes(5);
+  });
+
+  test("rejects a root swap and a mismatched bridge root identity", async () => {
+    const swapped = { ...identity, rootInode: rootInode + 1 };
+    const fixture = setupBridge();
+    let captures = 0;
+    await expect(runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request())), {
+      stores: {
+        anthropic: { read: async () => "sk-ant-fixture-secret-value" },
+        openrouter: { read: async () => null },
+      },
+      createBridge: fixture.createBridge,
+      captureRoot: async () => (++captures === 3 ? swapped : identity),
+      authorizeMaintenance: async () => undefined,
+    })).rejects.toThrow();
+    expect(fixture.calls.requested).toHaveLength(0);
+    expect(fixture.calls.closed).toBe(1);
+
+    const wrongHello = setupBridge();
+    const originalStart = wrongHello.createBridge;
+    await expect(runSecretHandoff(parseSecretHandoffRequest(JSON.stringify(request())), {
+      stores: {
+        anthropic: { read: async () => "sk-ant-fixture-secret-value" },
+        openrouter: { read: async () => null },
+      },
+      createBridge: (root) => ({
+        ...originalStart(root),
+        start: async () => ({ rootId: "b".repeat(64) }),
+      }),
+      captureRoot: async () => identity,
+      authorizeMaintenance: async () => undefined,
+    })).rejects.toThrow();
   });
 
   test("selects helper mode before every normal Desktop startup seam", () => {

@@ -93,11 +93,12 @@ import {
 } from "./media/session";
 import { TerminalManager } from "./terminal/manager";
 import {
-  assertCanonicalStagedRoot,
+  captureStagedRootIdentity,
   dispatchDesktopStartup,
   readSecretHandoffRequest,
   runSecretHandoff,
   secretFileForProvider,
+  unboundSecretHandoffAuthorization,
 } from "./migration/secret-handoff";
 import { RalphyBridgeClient } from "./ralphy/client";
 import { resolveRalphyExecutable } from "./ralphy/executable";
@@ -1228,7 +1229,8 @@ function startSecretHandoff(): void {
         createBridge: (root) => new RalphyBridgeClient(
           ralphyBin ? { bin: ralphyBin, root } : { root },
         ),
-        validateRoot: assertCanonicalStagedRoot,
+        captureRoot: captureStagedRootIdentity,
+        authorizeMaintenance: unboundSecretHandoffAuthorization,
       });
       app.exit(0);
     } catch {

@@ -6,6 +6,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,6 +14,8 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 import { RalphySession } from "../electron/ralphy/session";
 import { BRIDGE_METHODS } from "../electron/ralphy/types";
+
+const fixtureRootId = (root: string): string => createHash("sha256").update(root).digest("hex");
 
 let fixtureDirectory: string;
 let fixtureBin: string;
@@ -26,10 +29,11 @@ const readline = require("node:readline");
 
 const args = process.argv.slice(2);
 const root = args[args.indexOf("--root") + 1];
-const rootId = require("node:path").basename(root);
+const rootName = require("node:path").basename(root);
+const rootId = require("node:crypto").createHash("sha256").update(root).digest("hex");
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
-if (rootId === "never") setTimeout(() => process.exit(0), 1000).unref();
-if (rootId === "stubborn") {
+if (rootName === "never") setTimeout(() => process.exit(0), 1000).unref();
+if (rootName === "stubborn") {
   process.on("SIGTERM", () => {});
   setInterval(() => {}, 1000);
   setTimeout(() => process.exit(0), 3000);
@@ -38,10 +42,10 @@ if (rootId === "stubborn") {
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const request = JSON.parse(line);
   if (request.method === "system.hello") {
-    if (rootId === "never") return;
-    const delay = rootId === "slow" ? 60 : rootId === "fast" ? 5 : 0;
+    if (rootName === "never") return;
+    const delay = rootName === "slow" ? 60 : rootName === "fast" ? 5 : 0;
     setTimeout(() => {
-      if (rootId === "fail") {
+      if (rootName === "fail") {
         send({
           v: 1,
           id: request.id,
@@ -56,15 +60,13 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
         ok: true,
         result: {
           protocolVersion: 1,
-          contractVersion: 1,
           schemaVersion: 9,
           coreVersion: "2.0.0-test",
           storeId: "store-test",
           rootId,
-          consumerNamespaces: ["farm"],
-          consumers: { farm: null },
-          methods: ${JSON.stringify(BRIDGE_METHODS)},
+          capabilities: ${JSON.stringify(BRIDGE_METHODS)},
           activitySequence: 0,
+          startup: { state: "ready", migration: "complete" },
           limits: {
             maxFrameBytes: 1048576,
             maxRequestIdBytes: 128,
@@ -119,7 +121,7 @@ describe("RalphySession", () => {
     expect(session.rootEpoch).toBe(1);
     expect(session.root).toBe("/libraries/current");
     await expect(session.client.request("workspace.list", {})).resolves.toEqual({
-      rootId: "current",
+      rootId: fixtureRootId("/libraries/current"),
       environment: expect.any(Object),
     });
     await session.close();
@@ -133,7 +135,7 @@ describe("RalphySession", () => {
     const closed = expect(pending).rejects.toMatchObject({ code: "E_BRIDGE_CLOSED" });
 
     await expect(session.open("/libraries/next")).resolves.toMatchObject({
-      rootId: "next",
+      rootId: fixtureRootId("/libraries/next"),
     });
 
     await closed;
@@ -152,7 +154,7 @@ describe("RalphySession", () => {
     });
     const fast = session.open("/libraries/fast");
 
-    await expect(fast).resolves.toMatchObject({ rootId: "fast" });
+    await expect(fast).resolves.toMatchObject({ rootId: fixtureRootId("/libraries/fast") });
     await superseded;
     expect(session.rootEpoch).toBe(2);
     expect(session.root).toBe("/libraries/fast");
@@ -195,7 +197,7 @@ describe("RalphySession", () => {
     releasePreparation();
 
     await expect(stale).rejects.toMatchObject({ code: "E_BRIDGE_SUPERSEDED" });
-    await expect(latest).resolves.toMatchObject({ rootId: "fast" });
+    await expect(latest).resolves.toMatchObject({ rootId: fixtureRootId("/libraries/fast") });
     expect(events).toEqual([
       "prepare:/libraries/current",
       "rollback:/libraries/current",
@@ -262,7 +264,7 @@ describe("RalphySession", () => {
         replacement.then((hello) => hello.rootId),
         new Promise((resolve) => setTimeout(() => resolve("timeout"), 2500)),
       ]);
-      expect(outcome).toBe("next");
+      expect(outcome).toBe(fixtureRootId("/libraries/next"));
     } finally {
       await replacement;
       await session.close();
@@ -281,7 +283,7 @@ describe("RalphySession", () => {
     await session.open("/libraries/discovered");
 
     await expect(session.client.request("workspace.list", {})).resolves.toEqual({
-      rootId: "discovered",
+      rootId: fixtureRootId("/libraries/discovered"),
       environment: {
         leaked: null,
         path: [

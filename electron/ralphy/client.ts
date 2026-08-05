@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
-  spawn,
+  spawn as nodeSpawn,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 import { homedir } from "node:os";
@@ -8,7 +8,6 @@ import { join } from "node:path";
 import { TextDecoder } from "node:util";
 
 import {
-  BRIDGE_CONTRACT_VERSION,
   BRIDGE_LIMITS,
   BRIDGE_METHODS,
   BRIDGE_PROTOCOL_VERSION,
@@ -18,14 +17,12 @@ import {
   type BridgeHello,
   type BridgeMethod,
   type BridgeRequest,
-  type FarmConsumerHello,
   type ParamsFor,
   type ResultFor,
 } from "./types";
 
 const BRIDGE_METHOD_SET = new Set<string>(BRIDGE_METHODS);
 const PASSTHROUGH_ENV_KEYS = ["HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"] as const;
-const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const CLOSE_GRACE_MS = 1_000;
 const CLOSE_TERM_MS = 1_000;
@@ -38,12 +35,20 @@ interface PendingRequest {
 interface OutboundRequest extends PendingRequest {
   id: string;
   frame: Buffer;
+  sensitive: boolean;
 }
+
+export type SpawnRalphyBridge = (
+  bin: string,
+  args: string[],
+  options: { env: NodeJS.ProcessEnv; stdio: ["pipe", "pipe", "pipe"] },
+) => ChildProcessWithoutNullStreams;
 
 export interface RalphyBridgeClientOptions {
   bin?: string;
   root: string;
   env?: NodeJS.ProcessEnv;
+  spawn?: SpawnRalphyBridge;
 }
 
 export class RalphyBridgeError extends Error {
@@ -104,47 +109,8 @@ function nullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
-function safeId(value: unknown): value is string {
-  return typeof value === "string" && SAFE_ID.test(value);
-}
-
 function sha256Hex(value: unknown): value is string {
   return typeof value === "string" && SHA256_HEX.test(value);
-}
-
-function parseFarmConsumer(value: unknown): FarmConsumerHello | undefined {
-  if (value === null) return null;
-  const farm = record(value);
-  if (
-    !farm
-    || !exactKeys(farm, [
-      "namespace",
-      "state",
-      "coreMigrationRunId",
-      "migrationId",
-      "stageDigest",
-      "readyRecordDigest",
-      "identityDigest",
-    ])
-    || farm.namespace !== "farm"
-    || (farm.state !== "pending" && farm.state !== "ready")
-    || !safeId(farm.coreMigrationRunId)
-    || !safeId(farm.migrationId)
-    || !sha256Hex(farm.stageDigest)
-    || !sha256Hex(farm.readyRecordDigest)
-    || (farm.identityDigest !== null && !sha256Hex(farm.identityDigest))
-    || (farm.state === "pending" && farm.identityDigest !== null)
-    || (farm.state === "ready" && farm.identityDigest === null)
-  ) return undefined;
-  return {
-    namespace: "farm",
-    state: farm.state,
-    coreMigrationRunId: farm.coreMigrationRunId,
-    migrationId: farm.migrationId,
-    stageDigest: farm.stageDigest,
-    readyRecordDigest: farm.readyRecordDigest,
-    identityDigest: farm.identityDigest,
-  };
 }
 
 function exactLimits(value: unknown): value is typeof BRIDGE_LIMITS {
@@ -187,43 +153,42 @@ function parseHello(value: unknown): BridgeHello {
       "Ralphy bridge returned an invalid system.hello response",
     );
   }
-  if (
-    hello.protocolVersion !== BRIDGE_PROTOCOL_VERSION
-    || hello.contractVersion !== BRIDGE_CONTRACT_VERSION
-  ) {
+  if (hello.protocolVersion !== BRIDGE_PROTOCOL_VERSION) {
     throw new RalphyBridgeError(
       "E_BRIDGE_VERSION",
-      `Ralphy bridge protocol/contract ${String(hello.protocolVersion)}/${String(hello.contractVersion)} is incompatible with Desktop ${BRIDGE_PROTOCOL_VERSION}/${BRIDGE_CONTRACT_VERSION}. Update Ralphy CLI or Desktop.`,
+      `Ralphy bridge protocol ${String(hello.protocolVersion)} is incompatible with Desktop ${BRIDGE_PROTOCOL_VERSION}. Update Ralphy CLI or Desktop.`,
       {
-        expected: {
-          protocolVersion: BRIDGE_PROTOCOL_VERSION,
-          contractVersion: BRIDGE_CONTRACT_VERSION,
-        },
-        received: {
-          protocolVersion: hello.protocolVersion,
-          contractVersion: hello.contractVersion,
-        },
+        expected: { protocolVersion: BRIDGE_PROTOCOL_VERSION },
+        received: { protocolVersion: hello.protocolVersion },
       },
     );
   }
-  const consumers = record(hello.consumers);
-  const farm = consumers && exactKeys(consumers, ["farm"])
-    ? parseFarmConsumer(consumers.farm)
-    : undefined;
-  const methods = hello.methods;
+  const capabilities = hello.capabilities;
+  const startup = record(hello.startup);
   if (
-    !sequence(hello.schemaVersion)
+    !exactKeys(hello, [
+      "protocolVersion",
+      "coreVersion",
+      "schemaVersion",
+      "storeId",
+      "rootId",
+      "capabilities",
+      "activitySequence",
+      "startup",
+      "limits",
+    ])
+    || !sequence(hello.schemaVersion)
     || !nonEmptyString(hello.coreVersion)
     || !nonEmptyString(hello.storeId)
-    || !nonEmptyString(hello.rootId)
-    || !Array.isArray(hello.consumerNamespaces)
-    || hello.consumerNamespaces.length !== 1
-    || hello.consumerNamespaces[0] !== "farm"
-    || farm === undefined
-    || !Array.isArray(methods)
-    || !methods.every((method) => typeof method === "string")
-    || new Set(methods).size !== methods.length
+    || !sha256Hex(hello.rootId)
+    || !Array.isArray(capabilities)
+    || !capabilities.every((method) => typeof method === "string")
+    || new Set(capabilities).size !== capabilities.length
     || !sequence(hello.activitySequence)
+    || !startup
+    || !exactKeys(startup, ["state", "migration"])
+    || startup.state !== "ready"
+    || startup.migration !== "complete"
     || !exactLimits(hello.limits)
   ) {
     throw new RalphyBridgeError(
@@ -232,8 +197,8 @@ function parseHello(value: unknown): BridgeHello {
     );
   }
   if (
-    methods.length !== BRIDGE_METHODS.length
-    || !methods.every((method) => BRIDGE_METHOD_SET.has(method))
+    capabilities.length !== BRIDGE_METHODS.length
+    || !capabilities.every((method) => BRIDGE_METHOD_SET.has(method))
   ) {
     throw new RalphyBridgeError(
       "E_BRIDGE_VERSION",
@@ -242,15 +207,13 @@ function parseHello(value: unknown): BridgeHello {
   }
   return {
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
-    contractVersion: BRIDGE_CONTRACT_VERSION,
     schemaVersion: hello.schemaVersion,
     coreVersion: hello.coreVersion,
     storeId: hello.storeId,
     rootId: hello.rootId,
-    consumerNamespaces: ["farm"],
-    consumers: { farm },
-    methods: methods as BridgeMethod[],
+    capabilities: capabilities as BridgeMethod[],
     activitySequence: hello.activitySequence,
+    startup: { state: "ready", migration: "complete" },
     limits: BRIDGE_LIMITS,
   };
 }
@@ -293,9 +256,11 @@ export class RalphyBridgeClient {
   readonly #bin: string;
   readonly #root: string;
   readonly #env: NodeJS.ProcessEnv;
+  readonly #spawnBridge: SpawnRalphyBridge;
   readonly #decoder = new TextDecoder("utf-8", { fatal: true });
-  readonly #pending = new Map<string, PendingRequest>();
+  readonly #pending = new Map<string, OutboundRequest>();
   readonly #outbound: OutboundRequest[] = [];
+  readonly #writing = new Set<OutboundRequest>();
   readonly #listeners = new Set<(event: BridgeEvent) => void>();
   #child: ChildProcessWithoutNullStreams | null = null;
   #stdoutChunks: Buffer[] = [];
@@ -313,6 +278,7 @@ export class RalphyBridgeClient {
     this.#bin = options.bin || environment.RALPHY_BIN || "ralphy";
     this.#root = options.root;
     this.#env = bridgeEnvironment(environment);
+    this.#spawnBridge = options.spawn ?? nodeSpawn;
   }
 
   start(): Promise<BridgeHello> {
@@ -399,7 +365,7 @@ export class RalphyBridgeClient {
   }
 
   #spawn(): void {
-    const child = spawn(
+    const child = this.#spawnBridge(
       this.#bin,
       ["bridge", "--stdio", "--root", this.#root],
       { env: this.#env, stdio: ["pipe", "pipe", "pipe"] },
@@ -437,32 +403,38 @@ export class RalphyBridgeClient {
 
     const id = randomUUID();
     const request: BridgeRequest = { v: 1, id, method, params };
+    const sensitive = method === "migration.secret.import";
     let serialized: string;
     try {
       serialized = JSON.stringify(request);
     } catch (error) {
       return Promise.reject(new RalphyBridgeError(
         "E_BRIDGE_REQUEST",
-        error instanceof Error ? error.message : "Unable to serialize bridge request",
+        sensitive
+          ? "Unable to serialize sensitive bridge request"
+          : error instanceof Error ? error.message : "Unable to serialize bridge request",
       ));
     }
     const frameBytes = Buffer.byteLength(serialized);
     if (frameBytes > BRIDGE_LIMITS.maxFrameBytes) {
+      serialized = "";
       return Promise.reject(new RalphyBridgeError(
         "E_BRIDGE_FRAME_TOO_LARGE",
         "Ralphy bridge request exceeds the one MiB frame limit",
       ));
     }
     const frame = Buffer.from(`${serialized}\n`);
+    serialized = "";
     return new Promise((resolve, reject) => {
       if (this.#outboundBytes + frame.byteLength > BRIDGE_LIMITS.maxOutboundBytes) {
+        if (sensitive) frame.fill(0);
         reject(new RalphyBridgeError(
           "E_BRIDGE_BACKPRESSURE",
           "Ralphy bridge request queue is full",
         ));
         return;
       }
-      this.#outbound.push({ id, frame, resolve, reject });
+      this.#outbound.push({ id, frame, sensitive, resolve, reject });
       this.#outboundBytes += frame.byteLength;
       this.#pumpWrites();
     });
@@ -516,15 +488,25 @@ export class RalphyBridgeClient {
       if (!outbound) return;
       this.#outboundBytes -= outbound.frame.byteLength;
       this.#pending.set(outbound.id, outbound);
+      this.#writing.add(outbound);
       let writable: boolean;
       try {
         writable = child.stdin.write(outbound.frame, (error) => {
-          if (error) this.#fail(new RalphyBridgeError("E_BRIDGE_WRITE", error.message));
+          this.#writing.delete(outbound);
+          this.#wipeFrame(outbound);
+          if (error) this.#fail(new RalphyBridgeError(
+            "E_BRIDGE_WRITE",
+            outbound.sensitive ? "Unable to write sensitive bridge request" : error.message,
+          ));
         });
       } catch (error) {
+        this.#writing.delete(outbound);
+        this.#wipeFrame(outbound);
         this.#fail(new RalphyBridgeError(
           "E_BRIDGE_WRITE",
-          error instanceof Error ? error.message : "Unable to write bridge request",
+          outbound.sensitive
+            ? "Unable to write sensitive bridge request"
+            : error instanceof Error ? error.message : "Unable to write bridge request",
         ));
         return;
       }
@@ -657,7 +639,9 @@ export class RalphyBridgeClient {
       this.#protocolFailure("Ralphy bridge returned an invalid error envelope");
       return;
     }
-    pending.reject(new RalphyBridgeError(error.code, error.message, error.details));
+    pending.reject(pending.sensitive
+      ? new RalphyBridgeError(error.code, "Ralphy secret import failed")
+      : new RalphyBridgeError(error.code, error.message, error.details));
     this.#pumpWrites();
   }
 
@@ -673,11 +657,23 @@ export class RalphyBridgeClient {
   }
 
   #rejectPending(error: RalphyBridgeError): void {
-    for (const pending of this.#pending.values()) pending.reject(error);
+    for (const pending of this.#pending.values()) {
+      this.#wipeFrame(pending);
+      pending.reject(error);
+    }
     this.#pending.clear();
-    for (const outbound of this.#outbound) outbound.reject(error);
+    for (const outbound of this.#outbound) {
+      this.#wipeFrame(outbound);
+      outbound.reject(error);
+    }
     this.#outbound.length = 0;
     this.#outboundBytes = 0;
+    for (const writing of this.#writing) this.#wipeFrame(writing);
+    this.#writing.clear();
+  }
+
+  #wipeFrame(outbound: OutboundRequest): void {
+    if (outbound.sensitive) outbound.frame.fill(0);
   }
 
   #closedError(): RalphyBridgeError {

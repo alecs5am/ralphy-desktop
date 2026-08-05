@@ -1,5 +1,4 @@
 export const BRIDGE_PROTOCOL_VERSION = 1 as const;
-export const BRIDGE_CONTRACT_VERSION = 1 as const;
 export const BRIDGE_LIMITS = {
   maxFrameBytes: 1_048_576,
   maxRequestIdBytes: 128,
@@ -58,17 +57,17 @@ export const BRIDGE_METHODS = [
   "run.results",
   "run.cancel",
   "operation.find",
-  "generation.start",
-  "transform.start",
-  "transcription.start",
-  "repair.start",
   "composition.list",
   "composition.show",
+  "composition.revisions",
+  "composition.revision.show",
   "composition.revise",
   "composition.build",
   "composition.select",
   "unit.list",
   "unit.show",
+  "unit.revisions",
+  "unit.revision.show",
   "unit.revise",
   "unit.select",
   "unit.preview",
@@ -102,7 +101,6 @@ export const BRIDGE_METHODS = [
   "agent.turn.stop",
   "migration.secret.import",
   "migration.desktop.import",
-  "migration.consumer.map",
 ] as const;
 
 export type BridgeMethod = (typeof BRIDGE_METHODS)[number];
@@ -161,27 +159,15 @@ export type BridgeEvent =
     data: unknown;
   };
 
-export type FarmConsumerHello = null | {
-  namespace: "farm";
-  state: "pending" | "ready";
-  coreMigrationRunId: string;
-  migrationId: string;
-  stageDigest: string;
-  readyRecordDigest: string;
-  identityDigest: string | null;
-};
-
 export interface BridgeHello {
   protocolVersion: 1;
-  contractVersion: 1;
   schemaVersion: number;
   coreVersion: string;
   storeId: string;
   rootId: string;
-  consumerNamespaces: ["farm"];
-  consumers: { farm: FarmConsumerHello };
-  methods: BridgeMethod[];
+  capabilities: BridgeMethod[];
   activitySequence: number;
+  startup: { state: "ready"; migration: "complete" };
   limits: typeof BRIDGE_LIMITS;
 }
 
@@ -539,17 +525,17 @@ export interface BridgeMethodContract {
     resultsAfter?: string | null;
     resultsLimit?: number;
   }, { run: RunDto; results: Page<RunResultDto>; replayed: true }>;
-  "generation.start": Contract<ScopedParams & ExternalOperationParams & { input: JsonObject }, OperationAccepted>;
-  "transform.start": Contract<ScopedParams & ExternalOperationParams & { source: MediaRef; input: JsonObject }, OperationAccepted>;
-  "transcription.start": Contract<ScopedParams & ExternalOperationParams & { source: MediaRef; input?: JsonObject }, OperationAccepted>;
-  "repair.start": Contract<ScopedParams & ExternalOperationParams & { target: MediaRef; input: JsonObject }, OperationAccepted>;
   "composition.list": Contract<ScopedCursorParams, Page<CompositionDto>>;
   "composition.show": Contract<IdParams<"compositionId">, CompositionDto>;
+  "composition.revisions": Contract<IdParams<"compositionId"> & CursorParams, Page<CompositionRevisionDto>>;
+  "composition.revision.show": Contract<ScopedParams & { revisionId: string }, CompositionRevisionDto>;
   "composition.revise": Contract<IdParams<"compositionId"> & { expectedLatestRevisionId: string; input: JsonObject }, CompositionRevisionDto>;
   "composition.build": Contract<ScopedParams & ExternalOperationParams & { compositionRevisionId: string; input?: JsonObject }, OperationAccepted>;
   "composition.select": Contract<IdParams<"compositionId"> & { revisionId: string; expectedSelectedRevisionId: string | null }, CompositionDto>;
   "unit.list": Contract<ScopedCursorParams, Page<UnitDto>>;
   "unit.show": Contract<IdParams<"unitId">, UnitDto>;
+  "unit.revisions": Contract<IdParams<"unitId"> & CursorParams, Page<UnitRevisionDto>>;
+  "unit.revision.show": Contract<ScopedParams & { revisionId: string }, UnitRevisionDto>;
   "unit.revise": Contract<IdParams<"unitId"> & ExternalOperationParams & { expectedLatestRevisionId: string; input: JsonObject }, UnitRevisionDto | OperationAccepted>;
   "unit.select": Contract<IdParams<"unitId"> & { revisionId: string; expectedSelectedRevisionId: string | null }, UnitDto>;
   "unit.preview": Contract<ScopedParams & { unitRevisionId: string; platform: string }, UnitPreviewDto>;
@@ -600,16 +586,6 @@ export interface BridgeMethodContract {
   "agent.turn.stop": Contract<ScopedParams & { turnId: string; expectedState: string }, AgentTurnDto>;
   "migration.secret.import": Contract<MigrationSecretImportParams, MigrationSecretImportResult>;
   "migration.desktop.import": Contract<{ payload: JsonObject; idempotencyKey: string }, MigrationDto>;
-  "migration.consumer.map": Contract<{
-    migrationRunId: string;
-    lockNonce: string;
-    namespace: "farm";
-    grantDigest: string;
-    sourceIdentityId: string;
-    sourceInventoryDigest: string;
-    afterSourceLocatorHash?: string | null;
-    limit: number;
-  }, Page<{ sourceLocatorHash: string; sourceKind: string; targetRefs: Array<{ type: string; id: string }> }>>;
 }
 
 type AssertNever<Value extends never> = Value;
