@@ -51,6 +51,7 @@ export const BRIDGE_METHODS = [
   "evaluation.list",
   "evaluation.show",
   "evaluation.create",
+  "generation.start",
   "run.list",
   "run.show",
   "run.objects",
@@ -78,6 +79,7 @@ export const BRIDGE_METHODS = [
   "publication.reconcile",
   "publication.recover",
   "publication.refresh",
+  "repair.start",
   "metric.list",
   "metric.totals",
   "campaign.list",
@@ -101,6 +103,8 @@ export const BRIDGE_METHODS = [
   "agent.turn.stop",
   "migration.secret.import",
   "migration.desktop.import",
+  "transcription.start",
+  "transform.start",
 ] as const;
 
 export type BridgeMethod = (typeof BRIDGE_METHODS)[number];
@@ -420,6 +424,22 @@ type ExternalOperationTuple = Omit<ExternalOperation, "idempotencyKey">;
 type OperationFindSelector =
   | { external: ExternalOperationTuple; idempotencyKey?: never }
   | { idempotencyKey: string; external?: never };
+type ReplayableOperationParams = {
+  sessionId: string;
+  external: ExternalOperation;
+  workspaceId: string;
+  projectId?: string;
+  label?: string;
+  request: JsonValue;
+  job: {
+    kind: "generate.image" | "generate.video" | "generate.voiceover" | "generate.music"
+      | "generate.captions" | "generate.sfx" | "render" | "shell";
+    command: { argv: string[] };
+  };
+  priority?: number;
+  tag?: string;
+  resultsLimit?: number;
+};
 
 export interface MediaReviewParams {
   context: BridgeContext;
@@ -519,6 +539,7 @@ export interface BridgeMethodContract {
     note?: string;
     report?: JsonValue;
   }, EvaluationDto>;
+  "generation.start": Contract<ReplayableOperationParams, OperationAccepted>;
   "run.list": Contract<ScopedCursorParams & { kind?: string; state?: string }, Page<RunDto>>;
   "run.show": Contract<IdParams<"runId">, RunDto>;
   "run.objects": Contract<IdParams<"runId"> & CursorParams, Page<RunObjectDto>>;
@@ -557,6 +578,7 @@ export interface BridgeMethodContract {
     expectedClaimEpoch: number;
   }, PublicationRecoveryResult>;
   "publication.refresh": Contract<IdParams<"publicationId"> & ExternalOperationParams, OperationAccepted>;
+  "repair.start": Contract<ReplayableOperationParams, OperationAccepted>;
   "metric.list": Contract<IdParams<"publicationId"> & CursorParams, Page<MetricDto>>;
   "metric.totals": Contract<IdParams<"publicationId">, { publicationId: string; values: JsonObject }>;
   "campaign.list": Contract<ScopedCursorParams, Page<CampaignDto>>;
@@ -589,6 +611,8 @@ export interface BridgeMethodContract {
   "agent.turn.stop": Contract<ScopedParams & { turnId: string; expectedState: string }, AgentTurnDto>;
   "migration.secret.import": Contract<MigrationSecretImportParams, MigrationSecretImportResult>;
   "migration.desktop.import": Contract<{ payload: JsonObject; idempotencyKey: string }, MigrationDto>;
+  "transcription.start": Contract<ReplayableOperationParams, OperationAccepted>;
+  "transform.start": Contract<ReplayableOperationParams, OperationAccepted>;
 }
 
 type AssertNever<Value extends never> = Value;
